@@ -27,6 +27,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from rcs300 import RCS300
+from windows_unlock import WindowsUnlock
 
 
 # Windows API for workstation unlock
