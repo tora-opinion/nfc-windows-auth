@@ -4,11 +4,7 @@ RC-S300 FeliCa Reader Driver for iPhone Express Card
 
 Key Discovery: System code 0x0003 triggers iPhone Express Card mode!
 
-Standard system codes like 0xFFFF (wildcard) or 0x88B4 (transit IC)
-trigger Apple Pay payment mode which requires Face ID/Touch ID.
-
-System code 0x0003 is the magic code that activates Express Card (Suica)
-without user authentication, enabling seamless NFC login.
+Uses CCID Escape commands over USB Interface 1 (WinUSB).
 
 Author: Generated with Claude Code
 License: MIT
@@ -31,20 +27,6 @@ class RCS300:
 
     # Express Card magic system code
     SYSTEM_CODE_EXPRESS_CARD = 0x0003
-
-    # Standard system codes (don't trigger Express Card!)
-    SYSTEM_CODE_WILDCARD = 0xFFFF
-    SYSTEM_CODE_TRANSIT = 0x88B4
-
-    # CCID Session commands
-    CMD_SESSION_END = 0x82
-    CMD_SESSION_START = 0x81
-    CMD_RF_OFF = 0x83
-    CMD_RF_ON = 0x84
-
-    # Timing (from Sony NFC Port Library)
-    RF_OFF_GUARD_TIME = 0.030  # 30ms
-    RF_ON_GUARD_TIME = 0.021   # 21ms
 
     def __init__(self, libusb_path: Optional[str] = None):
         self.dev = None
@@ -76,9 +58,9 @@ class RCS300:
             try:
                 self.dev.set_configuration()
             except usb.core.USBError:
-                pass  # Already configured
+                pass
 
-            # Use Interface 1 (WinUSB), not Interface 0 (PC/SC)
+            # Interface 1 = WinUSB for NFC Port access
             usb.util.claim_interface(self.dev, 1)
 
             cfg = self.dev.get_active_configuration()
@@ -92,7 +74,6 @@ class RCS300:
                 intf,
                 custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN
             )
-
             return True
         except Exception as e:
             print(f"Failed to open RC-S300: {e}")
@@ -107,202 +88,122 @@ class RCS300:
                 pass
             self.dev = None
 
-    def _ccid_escape(self, data: bytes, timeout: int = 2000) -> bytes:
-        """Send CCID Escape command"""
+    def _ccid_escape(self, data: bytes, timeout: int = 2000) -> Optional[bytes]:
+        """Send CCID PC_to_RDR_Escape command"""
         self.seq = (self.seq + 1) % 256
+
+        # CCID PC_to_RDR_Escape header
         header = bytes([
-            0x6B,  # PC_to_RDR_Escape
-            len(data) & 0xFF,
-            (len(data) >> 8) & 0xFF,
-            0, 0,  # dwLength high bytes
-            0,     # bSlot
-            self.seq,  # bSeq
-            0, 0, 0    # abRFU
+            0x6B,                    # bMessageType = PC_to_RDR_Escape
+            len(data) & 0xFF,        # dwLength (low)
+            (len(data) >> 8) & 0xFF, # dwLength
+            0x00, 0x00,              # dwLength (high bytes)
+            0x00,                    # bSlot
+            self.seq,                # bSeq
+            0x00, 0x00, 0x00         # abRFU
         ])
 
-        self.dev.write(self.ep_out, header + bytes(data))
-        time.sleep(0.005)
+        try:
+            self.dev.write(self.ep_out, header + data)
+            time.sleep(0.01)
+            resp = bytes(self.dev.read(self.ep_in, 300, timeout=timeout))
 
-        resp = bytes(self.dev.read(self.ep_in, 300, timeout=timeout))
-        dw_len = resp[1] | (resp[2] << 8)
-        return resp[10:10 + dw_len]
+            # Parse CCID response
+            if len(resp) >= 10 and resp[0] == 0x83:  # RDR_to_PC_Escape
+                dw_len = resp[1] | (resp[2] << 8)
+                status = resp[7]
+                error = resp[8]
+                # Status: 0=no ICC, 1=ICC present inactive, 2=ICC present active
+                # Accept any status with data
+                if dw_len > 0:
+                    return resp[10:10 + dw_len]
+            return None
+        except Exception as e:
+            return None
 
     def _manage_session(self, tag: int, length: int = 0):
-        """Send session management command"""
-        cmd = [0xFF, 0x50, 0x00, 0x00, 2, tag, length, 0x00]
-        return self._ccid_escape(bytes(cmd))
-
-    def _transceive(self, cmd_bytes: bytes, timeout_ms: int = 500) -> Optional[bytes]:
-        """Send transceive command and get response"""
-        timeout_us = struct.pack('<I', timeout_ms * 1000)
-
-        # Build TLV data
-        cmd_data = [0x5F, 0x46, 0x04] + list(timeout_us)  # Timeout TLV
-        cmd_data += [0x95, 0x82, 0x00, len(cmd_bytes)] + list(cmd_bytes)  # Transceive TLV
-
-        # Build command
-        cmd = [0xFF, 0x50, 0x00, 0x01, 0x00,
-               (len(cmd_data) >> 8) & 0xFF,
-               len(cmd_data) & 0xFF] + cmd_data + [0, 0, 0]
-
-        resp = self._ccid_escape(bytes(cmd), timeout=timeout_ms + 500)
-
-        # Parse response for tag 0x97 (response data)
-        i = 0
-        while i < len(resp) - 1:
-            tag = resp[i]
-            if tag == 0x97:
-                i += 1
-                length = resp[i]
-                if length == 0x81:
-                    length = resp[i + 1]
-                    i += 1
-                elif length == 0x82:
-                    length = (resp[i + 1] << 8) | resp[i + 2]
-                    i += 2
-                i += 1
-                return bytes(resp[i:i + length])
-            elif tag == 0xC0:
-                # Status TLV - check for timeout/error
-                i += 1
-                length = resp[i]
-                i += 1
-                status = resp[i:i + length]
-                if length >= 3 and status[1] == 0x64:
-                    return None  # Timeout/no card
-                i += length
-            else:
-                i += 1
-                if i < len(resp):
-                    i += resp[i] + 1
-        return None
+        """Send session management command via CCID Escape"""
+        cmd = bytes([0xFF, 0x50, 0x00, 0x00, 0x02, tag, length, 0x00])
+        return self._ccid_escape(cmd)
 
     def start_session(self):
         """Initialize transparent session for FeliCa"""
-        try:
-            self._manage_session(self.CMD_SESSION_END)
-        except:
-            pass
+        # End any existing session
+        self._manage_session(0x82)
+        time.sleep(0.01)
 
-        self._manage_session(self.CMD_SESSION_START)
-        self._manage_session(self.CMD_RF_OFF)
-        time.sleep(self.RF_OFF_GUARD_TIME)
-        self._manage_session(self.CMD_RF_ON)
-        time.sleep(self.RF_ON_GUARD_TIME)
+        # Start session
+        self._manage_session(0x81)
+        time.sleep(0.01)
 
-        # Switch to FeliCa protocol (autoBaudRate=0)
-        self._ccid_escape(bytes([0xFF, 0x50, 0x00, 0x02, 4, 0x8F, 0x02, 0x03, 0x00, 0x00]))
+        # RF OFF
+        self._manage_session(0x83)
+        time.sleep(0.03)
+
+        # RF ON
+        self._manage_session(0x84)
+        time.sleep(0.02)
+
+        # Switch to FeliCa mode
+        cmd = bytes([0xFF, 0x50, 0x00, 0x02, 0x04, 0x8F, 0x02, 0x03, 0x00, 0x00])
+        self._ccid_escape(cmd)
+        time.sleep(0.01)
 
     def end_session(self):
         """End transparent session"""
-        try:
-            self._manage_session(self.CMD_SESSION_END)
-        except:
-            pass
+        self._manage_session(0x82)
 
-    def poll_express_card(self, timeout_ms: int = 100) -> Optional[Tuple[bytes, bytes]]:
+    def poll_express_card(self, timeout_ms: int = 500) -> Optional[Tuple[bytes, bytes]]:
         """
         Poll for iPhone Express Card using system code 0x0003
 
         Returns:
             Tuple of (IDm, PMm) if card detected, None otherwise
         """
-        # FeliCa Polling command: len, cmd, system_code_hi, system_code_lo, request_code, time_slot
-        poll_cmd = bytes([
-            6,      # Length
-            0x00,   # SENSF_REQ command
-            0x00,   # System code high byte
-            0x03,   # System code low byte (0x0003 = Express Card magic!)
-            0x01,   # Request code
-            0x00    # Time slot
-        ])
+        timeout_us = struct.pack('<I', timeout_ms * 1000)
+        sys_hi = (self.SYSTEM_CODE_EXPRESS_CARD >> 8) & 0xFF
+        sys_lo = self.SYSTEM_CODE_EXPRESS_CARD & 0xFF
 
-        resp = self._transceive(poll_cmd, timeout_ms)
+        # SENSF_REQ: len=6, cmd=00, sys_hi, sys_lo, req_code=01, time_slot=00
+        sensf_req = bytes([0x06, 0x00, sys_hi, sys_lo, 0x01, 0x00])
 
-        if resp and len(resp) >= 17:
-            # Response: length, response_code, IDm[8], PMm[8], [RD[2]]
-            idm = resp[1:9]
-            pmm = resp[9:17]
-            return (idm, pmm)
+        # Build InDataExchange TLV command
+        tlv_data = bytearray()
+        tlv_data += bytes([0x5F, 0x46, 0x04])  # Timeout TLV tag
+        tlv_data += timeout_us
+        tlv_data += bytes([0x95, 0x82, 0x00, len(sensf_req)])  # Transceive TLV
+        tlv_data += sensf_req
+
+        cmd = bytes([0xFF, 0x50, 0x00, 0x01, 0x00,
+                     (len(tlv_data) >> 8) & 0xFF,
+                     len(tlv_data) & 0xFF]) + bytes(tlv_data) + bytes([0x00, 0x00, 0x00])
+
+        resp = self._ccid_escape(cmd, timeout=timeout_ms + 1000)
+
+        if resp:
+            # Parse TLV response for tag 0x97 (response data)
+            i = 0
+            while i < len(resp) - 2:
+                tag = resp[i]
+                if tag == 0x97:  # Response data TLV
+                    i += 1
+                    length = resp[i]
+                    i += 1
+                    if length >= 17:
+                        # SENSF_RES: length(1), response_code(1), IDm[8], PMm[8], RD[2]
+                        data = resp[i:i + length]
+                        if len(data) >= 17 and data[1] == 0x01:  # response_code 01 = success
+                            idm = bytes(data[2:10])
+                            pmm = bytes(data[10:18])
+                            return (idm, pmm)
+                    break
+                else:
+                    # Skip to next TLV
+                    i += 1
+                    if i < len(resp):
+                        skip_len = resp[i]
+                        i += 1 + skip_len
+                    else:
+                        break
+
         return None
-
-    def read_felica_block(self, idm: bytes, service_code: int, block_num: int) -> Optional[bytes]:
-        """Read a block from FeliCa card"""
-        # Read Without Encryption command
-        cmd = bytes([
-            16,     # Length
-            0x06,   # Command code
-        ]) + idm + bytes([
-            1,      # Number of services
-            service_code & 0xFF,
-            (service_code >> 8) & 0xFF,
-            1,      # Number of blocks
-            0x80,   # Block list element (2-byte, access mode 0)
-            block_num
-        ])
-
-        resp = self._transceive(cmd, timeout_ms=500)
-
-        if resp and len(resp) >= 28 and resp[1] == 0x07:
-            status1 = resp[10]
-            if status1 == 0x00:
-                # Block data starts at offset 13
-                return resp[13:29]
-        return None
-
-    def read_suica_balance(self, idm: bytes) -> Optional[int]:
-        """Read Suica balance (service 0x008B, block 0)"""
-        block = self.read_felica_block(idm, 0x008B, 0)
-        if block and len(block) >= 12:
-            # Balance is at offset 10-11 (little-endian)
-            return int.from_bytes(block[10:12], 'little')
-        return None
-
-
-def main():
-    """Test the RC-S300 driver"""
-    import os
-
-    # Find libusb DLL
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    libusb_path = os.path.join(script_dir, '..', 'daemon', 'libusb-1.0.dll')
-
-    reader = RCS300(libusb_path)
-
-    if not reader.open():
-        print("Failed to open RC-S300")
-        return
-
-    print("RC-S300 opened successfully")
-
-    try:
-        reader.start_session()
-        print("Session started")
-        print("\nPlace iPhone on reader...")
-
-        for i in range(50):
-            result = reader.poll_express_card(timeout_ms=100)
-            if result:
-                idm, pmm = result
-                print(f"\n[SUCCESS] Express Card detected!")
-                print(f"  IDm: {idm.hex().upper()}")
-                print(f"  PMm: {pmm.hex().upper()}")
-
-                # Try to read balance
-                balance = reader.read_suica_balance(idm)
-                if balance is not None:
-                    print(f"  Balance: {balance} yen")
-                break
-            print(".", end="", flush=True)
-            time.sleep(0.1)
-        else:
-            print("\n[TIMEOUT] No card detected")
-
-    finally:
-        reader.end_session()
-        reader.close()
-        print("\nReader closed")
-
-
-if __name__ == "__main__":
-    main()

@@ -27,3 +27,7 @@ Desktop.ini
 
 # libusb (large binary)
 # daemon/libusb-1.0.dll
+
+.credentials.enc
+.nfc_auth_signal
+*.pdb
