@@ -58,6 +58,7 @@ def test_ccid_escape_gives_up_after_time_extension_deadline():
     reader.MAX_TIME_EXTENSION_SEC = -1  # deadline already passed on the first extension
     with pytest.raises(ReaderTimeout):
         reader._ccid_escape(b'\x00')
+    assert reader.dev.reads == 0
 
 
 def test_ccid_escape_keeps_waiting_beyond_ten_extensions():
@@ -70,6 +71,17 @@ def test_ccid_escape_applies_time_extension_multiplier():
     reader.dev.extension_error = 0x03
     assert reader._ccid_escape(b'\x00', timeout=1000) == b'\x90\x00'
     assert reader.dev.timeouts == [1000, 3000]
+
+
+def test_ccid_escape_clamps_large_multiplier_to_remaining_deadline(monkeypatch):
+    reader = _reader_with([0x80, 0x00])
+    reader.dev.extension_error = 0xFF
+    clock_values = iter([10.0, 10.0, 12.0])
+    monkeypatch.setattr(rcs300.time, 'monotonic', lambda: next(clock_values))
+
+    assert reader._ccid_escape(b'\x00', timeout=2000) == b'\x90\x00'
+
+    assert reader.dev.timeouts == [2000, 28000]
 
 
 def test_start_session_tolerates_failed_initial_cleanup():
