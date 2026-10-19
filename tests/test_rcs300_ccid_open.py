@@ -13,25 +13,30 @@ import rcs300
 from rcs300 import RCS300, ReaderTimeout
 
 
-def _response(seq, status=0x00, payload=b'\x90\x00'):
-    header = bytes([0x83]) + len(payload).to_bytes(4, 'little') + bytes([0x00, seq, status, 0x00, 0x00])
+def _response(seq, status=0x00, payload=b'\x90\x00', error=0x00):
+    header = bytes([0x83]) + len(payload).to_bytes(4, 'little') + bytes([0x00, seq, status, error, 0x00])
     return header + payload
 
 
 class _FakeDev:
     """Replays queued CCID responses; echoes the sequence number of the last write."""
 
-    def __init__(self, reader, statuses):
+    def __init__(self, reader, statuses, extension_error=0x00):
         self.reader = reader
         self.statuses = list(statuses)
+        self.extension_error = extension_error
         self.reads = 0
+        self.timeouts = []
 
     def write(self, ep, data):
         pass
 
     def read(self, ep, size, timeout=None):
         self.reads += 1
-        return _response(self.reader.seq, status=self.statuses.pop(0))
+        self.timeouts.append(timeout)
+        status = self.statuses.pop(0)
+        error = self.extension_error if status == 0x80 else 0x00
+        return _response(self.reader.seq, status=status, error=error)
 
 
 def _reader_with(statuses):
@@ -58,6 +63,13 @@ def test_ccid_escape_gives_up_after_time_extension_deadline():
 def test_ccid_escape_keeps_waiting_beyond_ten_extensions():
     reader = _reader_with([0x80] * 25 + [0x00])
     assert reader._ccid_escape(b'\x00') == b'\x90\x00'
+
+
+def test_ccid_escape_applies_time_extension_multiplier():
+    reader = _reader_with([0x80, 0x00])
+    reader.dev.extension_error = 0x03
+    assert reader._ccid_escape(b'\x00', timeout=1000) == b'\x90\x00'
+    assert reader.dev.timeouts == [1000, 3000]
 
 
 def test_start_session_tolerates_failed_initial_cleanup():

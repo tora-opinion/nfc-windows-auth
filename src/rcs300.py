@@ -235,10 +235,11 @@ class RCS300:
             # A time-extension response (bStatus 0x80, same bSeq) is followed by the real
             # response (CCID 6.2.6), so keep reading instead of treating it as a failure.
             deadline = time.monotonic() + self.MAX_TIME_EXTENSION_SEC
+            read_timeout = timeout
             while True:
-                response = bytes(self.dev.read(self.ep_in, 300, timeout=timeout))
+                response = bytes(self.dev.read(self.ep_in, 300, timeout=read_timeout))
                 is_time_extension = (
-                    len(response) >= 8
+                    len(response) >= 9
                     and response[0] == 0x83
                     and response[6] == self.seq
                     and (response[7] & 0xC0) == 0x80
@@ -247,6 +248,8 @@ class RCS300:
                     break
                 if time.monotonic() >= deadline:
                     raise ReaderTimeout('CCID time extension deadline exceeded')
+                # bError of a time-extension response is the timeout multiplier (CCID 6.2.6)
+                read_timeout = timeout * max(response[8], 1)
         except usb.core.USBTimeoutError as error:
             raise ReaderTimeout('Timed out communicating with RC-S300') from error
         except usb.core.USBError as error:

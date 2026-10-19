@@ -24,7 +24,7 @@ from datetime import datetime
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from rcs300 import RCS300
+from rcs300 import RCS300, ReaderError
 from nfc_common import (
     find_libusb,
     hash_idm,
@@ -126,6 +126,8 @@ class NFCAuthDaemon:
             try:
                 if session_active:
                     reader.end_session()
+            except ReaderError as error:
+                logger.warning("Failed to end session: %s", error)
             finally:
                 reader.close()
 
@@ -272,6 +274,8 @@ class NFCAuthDaemon:
             try:
                 if session_active:
                     self.reader.end_session()
+            except ReaderError as error:
+                logger.warning("Failed to end session: %s", error)
             finally:
                 self.reader.close()
             logger.info("Daemon stopped")
@@ -351,6 +355,8 @@ def main():
                 try:
                     if session_active:
                         reader.end_session()
+                except ReaderError as error:
+                    logger.warning("Failed to end session: %s", error)
                 finally:
                     reader.close()
         except Exception as error:
