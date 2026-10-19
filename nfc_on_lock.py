@@ -14,8 +14,15 @@ from pathlib import Path
 src_path = Path(__file__).resolve().parent / 'src'
 sys.path.insert(0, str(src_path))
 
-from nfc_common import find_libusb, hash_idm, load_config, log_idm, setup_logging
-from rcs300 import RCS300
+from nfc_common import (
+    find_libusb,
+    hash_idm,
+    load_config,
+    log_idm,
+    next_backoff_delay,
+    setup_logging,
+)
+from rcs300 import RCS300, ReaderError
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / 'config.json'
@@ -49,23 +56,31 @@ def main():
         return
 
     reader = RCS300(libusb)
-    try:
-        reader.open()
-    except Exception as error:
-        logger.error("Failed to open RC-S300: %s", error)
-        return
-
-    logger.info("RC-S300 ready. Waiting for NFC card...")
-
     session_active = False
+    reconnect_delay = None
     try:
-        reader.start_session()
-        session_active = True
         timeout = config.get('lock_timeout_sec', config.get('timeout_sec', 60))
         start_time = time.time()
 
         while time.time() - start_time < timeout:
-            result = reader.poll_express_card(timeout_ms=500)
+            try:
+                if reader.dev is None:
+                    reader.open()
+                    logger.info("RC-S300 ready. Waiting for NFC card...")
+                if not session_active:
+                    reader.start_session()
+                    session_active = True
+                result = reader.poll_express_card(timeout_ms=500)
+                reconnect_delay = None
+            except ReaderError as error:
+                # This task fires once per lock event, so retry until the timeout
+                logger.warning("Reader error: %s", error)
+                session_active = False
+                reader.close()
+                reconnect_delay = next_backoff_delay(reconnect_delay)
+                remaining = timeout - (time.time() - start_time)
+                time.sleep(max(0, min(reconnect_delay, remaining)))
+                continue
 
             if result:
                 idm, pmm = result
@@ -81,11 +96,13 @@ def main():
 
             time.sleep(0.3)
     except Exception as error:
-        logger.error("Reader error: %s", error)
+        logger.error("Unexpected error: %s", error)
     finally:
         try:
             if session_active:
                 reader.end_session()
+        except ReaderError as error:
+            logger.warning("Failed to end session: %s", error)
         finally:
             reader.close()
             logger.info("Done.")

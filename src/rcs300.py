@@ -120,8 +120,8 @@ class RCS300:
     # Express Card magic system code
     SYSTEM_CODE_EXPRESS_CARD = 0x0003
 
-    # Max consecutive CCID time-extension responses to wait through per command
-    MAX_TIME_EXTENSIONS = 10
+    # Total seconds to wait through CCID time-extension responses for one command
+    MAX_TIME_EXTENSION_SEC = 30
 
     def __init__(self, libusb_path: Optional[str] = None):
         self.dev = None
@@ -234,7 +234,8 @@ class RCS300:
             time.sleep(0.01)
             # A time-extension response (bStatus 0x80, same bSeq) is followed by the real
             # response (CCID 6.2.6), so keep reading instead of treating it as a failure.
-            for _ in range(self.MAX_TIME_EXTENSIONS + 1):
+            deadline = time.monotonic() + self.MAX_TIME_EXTENSION_SEC
+            while True:
                 response = bytes(self.dev.read(self.ep_in, 300, timeout=timeout))
                 is_time_extension = (
                     len(response) >= 8
@@ -244,8 +245,8 @@ class RCS300:
                 )
                 if not is_time_extension:
                     break
-            else:
-                raise ReaderTimeout('CCID time extension limit exceeded')
+                if time.monotonic() >= deadline:
+                    raise ReaderTimeout('CCID time extension deadline exceeded')
         except usb.core.USBTimeoutError as error:
             raise ReaderTimeout('Timed out communicating with RC-S300') from error
         except usb.core.USBError as error:
@@ -287,7 +288,11 @@ class RCS300:
 
     def start_session(self):
         """Initialize transparent session for FeliCa."""
-        self._manage_session(0x82)
+        try:
+            # Clear any stale session first; with none open the reader may report failure
+            self._manage_session(0x82)
+        except ReaderProtocolError:
+            pass
         time.sleep(0.01)
 
         self._manage_session(0x81)
