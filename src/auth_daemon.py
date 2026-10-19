@@ -17,16 +17,22 @@ import sys
 import json
 import time
 import ctypes
-import hashlib
-import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Dict, Optional
 from datetime import datetime
 
 # Add src to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from rcs300 import RCS300
+from nfc_common import (
+    find_libusb,
+    hash_idm,
+    load_config,
+    log_idm,
+    next_backoff_delay,
+    setup_logging,
+)
 from windows_unlock import WindowsUnlock
 
 
@@ -34,16 +40,8 @@ from windows_unlock import WindowsUnlock
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
-# Logging setup
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(Path(__file__).parent.parent / 'auth_daemon.log')
-    ]
-)
-logger = logging.getLogger(__name__)
+BASE_DIR = Path(__file__).resolve().parent.parent
+logger = setup_logging(__name__, BASE_DIR / 'auth_daemon.log')
 
 
 class NFCAuthDaemon:
@@ -65,17 +63,9 @@ class NFCAuthDaemon:
         self.last_auth_time = 0
         self.running = False
 
-    def _load_config(self) -> Dict:
+    def _load_config(self) -> dict:
         """Load configuration from file"""
-        if self.CONFIG_FILE.exists():
-            try:
-                with open(self.CONFIG_FILE, 'r') as f:
-                    config = json.load(f)
-                    # Merge with defaults
-                    return {**self.DEFAULT_CONFIG, **config}
-            except Exception as e:
-                logger.warning(f"Failed to load config: {e}")
-        return self.DEFAULT_CONFIG.copy()
+        return load_config(self.CONFIG_FILE, self.DEFAULT_CONFIG)
 
     def _save_config(self):
         """Save configuration to file"""
@@ -85,56 +75,38 @@ class NFCAuthDaemon:
         except Exception as e:
             logger.error(f"Failed to save config: {e}")
 
-    def _hash_idm(self, idm: bytes) -> str:
-        """Hash IDm for storage (security)"""
-        return hashlib.sha256(idm).hexdigest()
-
-    def _find_libusb(self) -> Optional[str]:
-        """Find libusb-1.0.dll"""
-        if self.config.get('libusb_path'):
-            return self.config['libusb_path']
-
-        # Check common locations
-        search_paths = [
-            Path(__file__).parent.parent / 'daemon' / 'libusb-1.0.dll',
-            Path(__file__).parent / 'libusb-1.0.dll',
-            Path(os.environ.get('PROGRAMFILES', '')) / 'libusb' / 'libusb-1.0.dll',
-        ]
-
-        for path in search_paths:
-            if path.exists():
-                return str(path)
-        return None
-
     def register_card(self, name: str, timeout_sec: int = 30) -> bool:
         """Register a new card for authentication"""
         logger.info(f"Registering card '{name}'...")
         logger.info("Place iPhone on RC-S300...")
 
-        libusb = self._find_libusb()
+        libusb = find_libusb(self.config, BASE_DIR)
         if not libusb:
             logger.error("libusb-1.0.dll not found!")
             return False
 
         reader = RCS300(libusb)
-        if not reader.open():
-            logger.error("Failed to open RC-S300")
+        try:
+            reader.open()
+        except Exception as error:
+            logger.error("Failed to open RC-S300: %s", error)
             return False
 
+        session_active = False
         try:
             reader.start_session()
+            session_active = True
 
             start_time = time.time()
             while time.time() - start_time < timeout_sec:
                 result = reader.poll_express_card(timeout_ms=100)
                 if result:
                     idm, pmm = result
-                    idm_hash = self._hash_idm(idm)
-                    idm_hex = idm.hex().upper()
+                    idm_hash = hash_idm(idm)
 
                     self.config['registered_cards'][idm_hash] = {
                         'name': name,
-                        'idm_preview': idm_hex[:8] + '...',
+                        'idm_preview': idm_hash[:8] + '...',
                         'registered_at': datetime.now().isoformat(),
                         'last_used': None
                     }
@@ -142,7 +114,7 @@ class NFCAuthDaemon:
 
                     logger.info(f"Card registered successfully!")
                     logger.info(f"  Name: {name}")
-                    logger.info(f"  IDm: {idm_hex}")
+                    log_idm(logger, 20, 'Card registered', idm)
                     return True
 
                 time.sleep(0.1)
@@ -151,8 +123,11 @@ class NFCAuthDaemon:
             return False
 
         finally:
-            reader.end_session()
-            reader.close()
+            try:
+                if session_active:
+                    reader.end_session()
+            finally:
+                reader.close()
 
     def list_cards(self) -> Dict:
         """List registered cards"""
@@ -221,44 +196,44 @@ class NFCAuthDaemon:
 
     def _authenticate_card(self, idm: bytes) -> bool:
         """Check if card is registered and authenticate"""
-        idm_hash = self._hash_idm(idm)
+        idm_hash = hash_idm(idm)
 
         if idm_hash in self.config.get('registered_cards', {}):
             card_info = self.config['registered_cards'][idm_hash]
             card_info['last_used'] = datetime.now().isoformat()
             self._save_config()
 
-            logger.info(f"Authenticated: {card_info['name']}")
+            log_idm(logger, 20, f"Authenticated: {card_info['name']}", idm)
             return True
 
-        logger.warning(f"Unknown card: {idm.hex().upper()}")
+        log_idm(logger, 30, 'Unknown card', idm)
         return False
 
     def run(self):
         """Main daemon loop"""
         logger.info("NFC Auth Daemon starting...")
 
-        libusb = self._find_libusb()
+        libusb = find_libusb(self.config, BASE_DIR)
         if not libusb:
             logger.error("libusb-1.0.dll not found!")
             return
 
         self.reader = RCS300(libusb)
-        if not self.reader.open():
-            logger.error("Failed to open RC-S300")
-            return
-
-        logger.info("RC-S300 opened successfully")
         logger.info(f"Registered cards: {len(self.config.get('registered_cards', {}))}")
 
         self.running = True
         session_active = False
         last_detect_time = 0
-        cooldown_sec = 3  # Prevent rapid re-authentication
+        cooldown_sec = self.config.get('cooldown_sec', 3)  # Prevent rapid re-authentication
+        reconnect_delay = None
 
         try:
             while self.running:
                 try:
+                    if self.reader.dev is None:
+                        self.reader.open()
+                        logger.info("RC-S300 opened successfully")
+
                     # Start session if needed
                     if not session_active:
                         self.reader.start_session()
@@ -267,6 +242,7 @@ class NFCAuthDaemon:
 
                     # Poll for card
                     result = self.reader.poll_express_card(timeout_ms=100)
+                    reconnect_delay = None
 
                     if result:
                         idm, pmm = result
@@ -284,14 +260,20 @@ class NFCAuthDaemon:
                 except KeyboardInterrupt:
                     break
                 except Exception as e:
-                    logger.error(f"Error in main loop: {e}")
+                    logger.error("Error in main loop: %s", e)
                     session_active = False
-                    time.sleep(1)
+                    self.reader.close()
+                    reconnect_delay = next_backoff_delay(reconnect_delay)
+                    logger.warning("Reconnecting to RC-S300 in %.1f seconds", reconnect_delay)
+                    # The loop head reopens the reader; a failed open comes back here and backs off further
+                    time.sleep(reconnect_delay)
 
         finally:
-            if session_active:
-                self.reader.end_session()
-            self.reader.close()
+            try:
+                if session_active:
+                    self.reader.end_session()
+            finally:
+                self.reader.close()
             logger.info("Daemon stopped")
 
     def stop(self):
@@ -336,7 +318,7 @@ def main():
             print("\nRegistered cards:")
             for idm_hash, info in cards.items():
                 print(f"  - {info['name']}")
-                print(f"    IDm: {info['idm_preview']}")
+                print(f"    IDm hash preview: {idm_hash[:8]}...")
                 print(f"    Registered: {info['registered_at']}")
                 print(f"    Last used: {info.get('last_used', 'Never')}")
         else:
@@ -345,26 +327,34 @@ def main():
         daemon.remove_card(args.name)
     elif args.command == 'test':
         # Quick test
-        libusb = daemon._find_libusb()
+        libusb = find_libusb(daemon.config, BASE_DIR)
         reader = RCS300(libusb)
-        if reader.open():
+        try:
+            reader.open()
             print("RC-S300 found. Place iPhone on reader...")
-            reader.start_session()
-            for i in range(30):
-                result = reader.poll_express_card()
-                if result:
-                    idm, pmm = result
-                    print(f"\nCard detected!")
-                    print(f"  IDm: {idm.hex().upper()}")
-                    break
-                print(".", end="", flush=True)
-                time.sleep(0.1)
-            else:
-                print("\nNo card detected")
-            reader.end_session()
-            reader.close()
-        else:
-            print("Failed to open RC-S300")
+            session_active = False
+            try:
+                reader.start_session()
+                session_active = True
+                for i in range(30):
+                    result = reader.poll_express_card()
+                    if result:
+                        idm, pmm = result
+                        print("\nCard detected!")
+                        log_idm(logger, 20, 'Card detected', idm)
+                        break
+                    print(".", end="", flush=True)
+                    time.sleep(0.1)
+                else:
+                    print("\nNo card detected")
+            finally:
+                try:
+                    if session_active:
+                        reader.end_session()
+                finally:
+                    reader.close()
+        except Exception as error:
+            logger.error("Reader test failed: %s", error)
     else:
         parser.print_help()
 

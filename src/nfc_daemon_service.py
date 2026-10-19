@@ -13,121 +13,119 @@ License: MIT
 import os
 import sys
 import time
-import json
-import hashlib
 from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from nfc_common import (
+    find_libusb,
+    hash_idm,
+    load_config,
+    log_idm,
+    next_backoff_delay,
+    setup_logging,
+)
 from rcs300 import RCS300
 
 # Paths
-BASE_DIR = Path(__file__).parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_FILE = BASE_DIR / 'config.json'
 SIGNAL_FILE = BASE_DIR / '.nfc_auth_signal'
+logger = setup_logging(__name__, BASE_DIR / 'nfc_daemon_service.log')
 
 
 class NFCDaemonService:
-    """NFC monitoring daemon for Credential Provider integration"""
+    """NFC monitoring daemon for Credential Provider integration."""
 
     def __init__(self):
-        self.config = self._load_config()
+        self.config = load_config(CONFIG_FILE)
         self.reader = None
         self.running = False
 
-    def _load_config(self) -> dict:
-        if CONFIG_FILE.exists():
-            with open(CONFIG_FILE, 'r') as f:
-                return json.load(f)
-        return {'registered_cards': {}}
-
-    def _hash_idm(self, idm: bytes) -> str:
-        return hashlib.sha256(idm).hexdigest()
-
-    def _find_libusb(self) -> Optional[str]:
-        paths = [
-            BASE_DIR / 'daemon' / 'libusb-1.0.dll',
-            BASE_DIR / 'src' / 'libusb-1.0.dll',
-        ]
-        for p in paths:
-            if p.exists():
-                return str(p)
-        return None
-
     def _write_signal(self):
-        """Write signal file for Credential Provider"""
+        """Write signal file for Credential Provider."""
         SIGNAL_FILE.write_text(f"authenticated:{time.time()}")
-        print(f"Signal written: {SIGNAL_FILE}")
+        logger.info("Signal written: %s", SIGNAL_FILE)
 
     def _clear_signal(self):
-        """Clear signal file"""
+        """Clear signal file."""
         if SIGNAL_FILE.exists():
             SIGNAL_FILE.unlink()
 
     def run(self):
-        """Main daemon loop"""
-        print("NFC Daemon Service starting...")
+        """Main daemon loop."""
+        logger.info("NFC Daemon Service starting...")
 
-        libusb = self._find_libusb()
+        self.config.setdefault('registered_cards', {})
+        libusb = find_libusb(self.config, BASE_DIR)
         if not libusb:
-            print("ERROR: libusb not found!")
+            logger.error("libusb not found!")
             return
 
         if not self.config.get('registered_cards'):
-            print("ERROR: No cards registered!")
+            logger.error("No cards registered!")
             return
 
         self.reader = RCS300(libusb)
-        if not self.reader.open():
-            print("ERROR: Failed to open RC-S300")
-            return
-
-        print("RC-S300 opened")
-        print(f"Registered cards: {len(self.config['registered_cards'])}")
-        print("Monitoring for NFC cards...")
+        logger.info("Registered cards: %d", len(self.config['registered_cards']))
+        logger.info("Monitoring for NFC cards...")
 
         self.running = True
         session_active = False
         last_auth_time = 0
-        cooldown = 5  # seconds
+        cooldown = self.config.get('cooldown_sec', 5)  # seconds
+        poll_interval = self.config.get('poll_interval_ms', 100) / 1000.0
+        reconnect_delay = None
 
         try:
             while self.running:
                 try:
+                    if self.reader.dev is None:
+                        self.reader.open()
+                        logger.info("RC-S300 opened")
+
                     if not session_active:
                         self.reader.start_session()
                         session_active = True
 
                     result = self.reader.poll_express_card(timeout_ms=100)
+                    reconnect_delay = None
 
                     if result:
                         idm, pmm = result
-                        idm_hash = self._hash_idm(idm)
+                        idm_hash = hash_idm(idm)
 
                         if idm_hash in self.config.get('registered_cards', {}):
                             current_time = time.time()
                             if current_time - last_auth_time > cooldown:
-                                print(f"Authenticated: {idm.hex().upper()}")
+                                log_idm(logger, 20, 'Authenticated', idm)
                                 self._write_signal()
                                 last_auth_time = current_time
                         else:
-                            print(f"Unknown card: {idm.hex().upper()}")
+                            log_idm(logger, 30, 'Unknown card', idm)
 
-                    time.sleep(0.1)
+                    time.sleep(poll_interval)
 
                 except KeyboardInterrupt:
                     break
-                except Exception as e:
-                    print(f"Error: {e}")
+                except Exception as error:
+                    logger.error("Reader error: %s", error)
                     session_active = False
-                    time.sleep(1)
+                    self.reader.close()
+                    reconnect_delay = next_backoff_delay(reconnect_delay)
+                    logger.warning(
+                        "Reconnecting to RC-S300 in %.1f seconds", reconnect_delay
+                    )
+                    # The loop head reopens the reader; a failed open comes back here and backs off further
+                    time.sleep(reconnect_delay)
 
         finally:
-            if session_active:
-                self.reader.end_session()
-            self.reader.close()
-            print("Daemon stopped")
+            try:
+                if session_active:
+                    self.reader.end_session()
+            finally:
+                self.reader.close()
+            logger.info("Daemon stopped")
 
     def stop(self):
         self.running = False

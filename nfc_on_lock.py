@@ -6,76 +6,65 @@ Polls for NFC card, writes signal file, then exits.
 Triggered by Task Scheduler on lock event.
 """
 
-import os
 import sys
 import time
-import json
-import hashlib
 from pathlib import Path
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-# Add src to path
-src_path = Path(__file__).parent / 'src'
+# Add src to path so this also works from a Scheduled Task.
+src_path = Path(__file__).resolve().parent / 'src'
 sys.path.insert(0, str(src_path))
 
+from nfc_common import find_libusb, hash_idm, load_config, log_idm, setup_logging
 from rcs300 import RCS300
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = BASE_DIR / 'config.json'
 SIGNAL_FILE = BASE_DIR / '.nfc_auth_signal'
+logger = setup_logging('nfc_on_lock', BASE_DIR / 'nfc_on_lock.log')
 
-def load_config():
-    if CONFIG_FILE.exists():
-        with open(CONFIG_FILE, 'r') as f:
-            return json.load(f)
-    return {'registered_cards': {}}
-
-def hash_idm(idm: bytes) -> str:
-    return hashlib.sha256(idm).hexdigest()
-
-def find_libusb():
-    # Use absolute path for reliability
-    return 'C:/Users/suger.G-GEAR/nfc-windows-auth/libusb/VS2022/MS64/dll/libusb-1.0.dll'
 
 def is_workstation_locked():
-    """Check if workstation is still locked"""
+    """Check if workstation is still locked."""
     import ctypes
     user32 = ctypes.windll.user32
-    # If desktop is not visible, we're likely locked
-    hDesktop = user32.OpenDesktopW("Default", 0, False, 0x0001)
-    if hDesktop:
-        user32.CloseDesktop(hDesktop)
+    # If desktop is not visible, we're likely locked.
+    h_desktop = user32.OpenDesktopW("Default", 0, False, 0x0001)
+    if h_desktop:
+        user32.CloseDesktop(h_desktop)
         return False
     return True
 
-def main():
-    print("NFC Lock Screen Auth starting...")
 
-    config = load_config()
+def main():
+    logger.info("NFC Lock Screen Auth starting...")
+
+    config = load_config(CONFIG_FILE)
     if not config.get('registered_cards'):
-        print("No cards registered!")
+        logger.error("No cards registered!")
         return
 
-    libusb = find_libusb()
+    libusb = find_libusb(config, BASE_DIR)
     if not libusb:
-        print("libusb not found!")
+        logger.error("libusb not found!")
         return
 
     reader = RCS300(libusb)
-    if not reader.open():
-        print("Failed to open RC-S300")
+    try:
+        reader.open()
+    except Exception as error:
+        logger.error("Failed to open RC-S300: %s", error)
         return
 
-    print("RC-S300 ready. Waiting for NFC card...")
+    logger.info("RC-S300 ready. Waiting for NFC card...")
 
+    session_active = False
     try:
         reader.start_session()
-        timeout = 60  # Max 60 seconds polling
+        session_active = True
+        timeout = config.get('lock_timeout_sec', config.get('timeout_sec', 60))
         start_time = time.time()
 
         while time.time() - start_time < timeout:
-            # Check if still locked (optional - exit early if unlocked)
             result = reader.poll_express_card(timeout_ms=500)
 
             if result:
@@ -83,19 +72,24 @@ def main():
                 idm_hash = hash_idm(idm)
 
                 if idm_hash in config.get('registered_cards', {}):
-                    print(f"Authenticated: {idm.hex().upper()}")
+                    log_idm(logger, 20, 'Authenticated', idm)
                     SIGNAL_FILE.write_text(f"authenticated:{time.time()}")
-                    print("Signal file written. Login should proceed.")
+                    logger.info("Signal file written. Login should proceed.")
                     break
                 else:
-                    print(f"Unknown card: {idm.hex().upper()}")
+                    log_idm(logger, 30, 'Unknown card', idm)
 
             time.sleep(0.3)
-
-        reader.end_session()
+    except Exception as error:
+        logger.error("Reader error: %s", error)
     finally:
-        reader.close()
-        print("Done.")
+        try:
+            if session_active:
+                reader.end_session()
+        finally:
+            reader.close()
+            logger.info("Done.")
+
 
 if __name__ == '__main__':
     main()

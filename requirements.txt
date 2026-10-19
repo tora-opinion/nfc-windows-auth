@@ -1,0 +1,3 @@
+pyusb
+pywin32
+pytest
