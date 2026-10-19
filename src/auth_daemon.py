@@ -122,6 +122,10 @@ class NFCAuthDaemon:
             logger.error("Timeout - no card detected")
             return False
 
+        except ReaderError as error:
+            logger.error("Reader error during registration: %s", error)
+            return False
+
         finally:
             try:
                 if session_active:
