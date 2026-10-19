@@ -31,3 +31,19 @@ Desktop.ini
 .credentials.enc
 .nfc_auth_signal
 *.pdb
+
+# Secrets / runtime state
+.credentials.dpapi
+.nfc_auth_signal
+register_log.txt
+.claude/
+
+# Build artifacts
+*.obj
+*.exp
+*.lib
+credential_provider/build/
+credential_provider/bin/*.dll
+
+# libusb distribution: only VS2022/MS64/dll/libusb-1.0.dll is force-tracked
+libusb/
