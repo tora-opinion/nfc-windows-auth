@@ -120,6 +120,9 @@ class RCS300:
     # Express Card magic system code
     SYSTEM_CODE_EXPRESS_CARD = 0x0003
 
+    # Max consecutive CCID time-extension responses to wait through per command
+    MAX_TIME_EXTENSIONS = 10
+
     def __init__(self, libusb_path: Optional[str] = None):
         self.dev = None
         self.ep_out = None
@@ -148,7 +151,16 @@ class RCS300:
             if self.dev is None:
                 raise ReaderDisconnected('RC-S300 not found')
 
-            self.dev.set_configuration()
+            # Skip set_configuration() when already configured: repeating it resets the
+            # device, and WinUSB often rejects it. A truly unusable device still fails
+            # at the descriptor lookup / claim_interface below with a typed error.
+            try:
+                self.dev.get_active_configuration()
+            except usb.core.USBError:
+                try:
+                    self.dev.set_configuration()
+                except usb.core.USBError:
+                    pass
 
             # Interface 1 = WinUSB for NFC Port access
             usb.util.claim_interface(self.dev, 1)
@@ -220,7 +232,20 @@ class RCS300:
         try:
             self.dev.write(self.ep_out, header + data)
             time.sleep(0.01)
-            response = bytes(self.dev.read(self.ep_in, 300, timeout=timeout))
+            # A time-extension response (bStatus 0x80, same bSeq) is followed by the real
+            # response (CCID 6.2.6), so keep reading instead of treating it as a failure.
+            for _ in range(self.MAX_TIME_EXTENSIONS + 1):
+                response = bytes(self.dev.read(self.ep_in, 300, timeout=timeout))
+                is_time_extension = (
+                    len(response) >= 8
+                    and response[0] == 0x83
+                    and response[6] == self.seq
+                    and (response[7] & 0xC0) == 0x80
+                )
+                if not is_time_extension:
+                    break
+            else:
+                raise ReaderTimeout('CCID time extension limit exceeded')
         except usb.core.USBTimeoutError as error:
             raise ReaderTimeout('Timed out communicating with RC-S300') from error
         except usb.core.USBError as error:
@@ -241,8 +266,6 @@ class RCS300:
             raise ReaderProtocolError(
                 f'CCID command failed (error 0x{error_code:02X})'
             )
-        if command_status == 0x80:
-            raise ReaderTimeout('CCID reader requested a time extension')
         if command_status == 0xC0:
             raise ReaderProtocolError('Invalid CCID command status')
 
