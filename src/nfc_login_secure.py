@@ -22,7 +22,8 @@ from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from rcs300 import RCS300
+from nfc_common import next_backoff_delay
+from rcs300 import RCS300, ReaderError
 
 # Windows DPAPI
 crypt32 = ctypes.windll.crypt32
@@ -257,12 +258,16 @@ class NFCLoginSecure:
             return False
 
         reader = RCS300(libusb)
-        if not reader.open():
-            print("Failed to open RC-S300")
+        try:
+            reader.open()
+        except ReaderError as error:
+            print(f"Failed to open RC-S300: {error}")
             return False
 
+        session_active = False
         try:
             reader.start_session()
+            session_active = True
 
             for i in range(50):
                 result = reader.poll_express_card(timeout_ms=100)
@@ -283,8 +288,16 @@ class NFCLoginSecure:
                 print("\nTimeout")
                 return False
 
+        except ReaderError as error:
+            print(f"\nReader error: {error}")
+            return False
+
         finally:
-            reader.end_session()
+            try:
+                if session_active:
+                    reader.end_session()
+            except ReaderError:
+                pass
             reader.close()
 
         print()
@@ -307,17 +320,36 @@ class NFCLoginSecure:
             return
 
         reader = RCS300(libusb)
-        if not reader.open():
-            print("Failed to open reader")
+        try:
+            reader.open()
+        except ReaderError as error:
+            print(f"Failed to open reader: {error}")
             return
 
         print("Waiting for iPhone...")
 
-        try:
-            reader.start_session()
+        session_active = False
+        reconnect_delay = None
 
+        try:
             while True:
-                result = reader.poll_express_card(timeout_ms=100)
+                try:
+                    if reader.dev is None:
+                        reader.open()
+                    if not session_active:
+                        reader.start_session()
+                        session_active = True
+                    result = reader.poll_express_card(timeout_ms=100)
+                    reconnect_delay = None
+                except ReaderError as error:
+                    # Keep the long-running loop alive across USB hiccups / unplug
+                    print(f"Reader error: {error}")
+                    session_active = False
+                    reader.close()
+                    reconnect_delay = next_backoff_delay(reconnect_delay)
+                    time.sleep(reconnect_delay)
+                    continue
+
                 if result:
                     idm, pmm = result
                     idm_hash = self._hash_idm(idm)
@@ -333,7 +365,11 @@ class NFCLoginSecure:
                 time.sleep(0.1)
 
         finally:
-            reader.end_session()
+            try:
+                if session_active:
+                    reader.end_session()
+            except ReaderError:
+                pass
             reader.close()
 
 
