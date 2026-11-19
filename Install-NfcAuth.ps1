@@ -18,12 +18,17 @@
     Install even when the chosen Python installation can be modified
     without administrator rights. Doing so hands SYSTEM to anyone who can
     write to it.
+
+.PARAMETER PythonPath
+    Use this interpreter instead of searching. Point it at a machine-wide
+    installation that already has pywin32 and pyusb.
 #>
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
     [switch]$SkipBuild,
-    [switch]$AllowUnprotectedPython
+    [switch]$AllowUnprotectedPython,
+    [string]$PythonPath
 )
 
 Set-StrictMode -Version Latest
@@ -47,18 +52,67 @@ $legacyTasks = @('NFC Auth On Lock', 'NFC_Login_Unlock')
 function Write-Step { param([string]$Message) Write-Host "==> $Message" -ForegroundColor Cyan }
 function Write-Note { param([string]$Message) Write-Host "    $Message" -ForegroundColor DarkGray }
 
-function Resolve-Python {
+function Get-PythonCandidates {
+    <#
+        Machine-wide installations come first. The LocalSystem service loads
+        whichever interpreter is chosen, so a per-user one is only a fallback
+        and the caller is warned about it afterwards.
+    #>
+    # An explicitly named interpreter is the whole list: falling back to
+    # another one would quietly install the service against a different
+    # environment than the administrator chose.
+    if ($PythonPath) { return @(@{ Path = $PythonPath; Prefix = @() }) }
+
+    $candidates = @()
+
+    foreach ($view in @('', ('WOW6432Node' + [char]92))) {
+        $root = 'HKLM:' + [char]92 + 'SOFTWARE' + [char]92 + $view + 'Python' + [char]92 + 'PythonCore'
+        foreach ($version in (Get-ChildItem -Path $root -ErrorAction SilentlyContinue)) {
+            $install = Get-ItemProperty -Path (Join-Path $version.PSPath 'InstallPath') -ErrorAction SilentlyContinue
+            if (-not $install) { continue }
+            $home_ = $install.'(default)'
+            if (-not $home_) { continue }
+            $exe = Join-Path $home_ 'python.exe'
+            if (Test-Path -LiteralPath $exe) { $candidates += @{ Path = $exe; Prefix = @() } }
+        }
+    }
+    foreach ($exe in (Get-ChildItem -Path (Join-Path $env:ProgramFiles 'Python*') -Directory -ErrorAction SilentlyContinue)) {
+        $full = Join-Path $exe.FullName 'python.exe'
+        if (Test-Path -LiteralPath $full) { $candidates += @{ Path = $full; Prefix = @() } }
+    }
+
     # Each prefix is carried explicitly: slicing a one-element array with
     # 1..($length - 1) yields the descending range 1,0 rather than nothing,
-    # which throws under Set-StrictMode and would abort on a machine that has
-    # python.exe but no py launcher.
-    foreach ($candidate in @(
-        @{ Command = 'py'; Prefix = @('-3') },
-        @{ Command = 'python'; Prefix = @() }
-    )) {
-        $command = Get-Command $candidate.Command -ErrorAction SilentlyContinue
-        if (-not $command) { continue }
-        $arguments = @($candidate.Prefix) + @('-c', 'import win32serviceutil')
+    # which throws under Set-StrictMode.
+    foreach ($name in @(@{ Command = 'py'; Prefix = @('-3') }, @{ Command = 'python'; Prefix = @() })) {
+        $command = Get-Command $name.Command -ErrorAction SilentlyContinue
+        if ($command) { $candidates += @{ Path = $command.Source; Prefix = $name.Prefix } }
+    }
+    return @($candidates)
+}
+
+function Resolve-Python {
+    foreach ($candidate in (Get-PythonCandidates)) {
+        if (-not (Test-Path -LiteralPath $candidate.Path)) {
+            if ($PythonPath) { throw "No interpreter at -PythonPath: $($candidate.Path)" }
+            continue
+        }
+        # Every requirement in one probe, each with its own exit code, so a
+        # candidate that cannot actually run the service is skipped rather
+        # than installed and discovered broken later:
+        #   3  32-bit, but the bundled libusb-1.0.dll is x64
+        #   4  older than the Python 3.9 the service code needs
+        #   other non-zero  pywin32 or pyusb is missing
+        # The version test comes first and parses under Python 2, so an old
+        # registered interpreter reports itself instead of a syntax error.
+        $probe = @'
+import sys
+if sys.version_info < (3, 9): sys.exit(4)
+if sys.maxsize <= 2**32: sys.exit(3)
+import win32serviceutil
+import usb.core
+'@
+        $arguments = @($candidate.Prefix) + @('-c', $probe)
         # The output is discarded rather than left on the pipeline, where it
         # would join this function's own output and turn the returned object
         # into an array that strict mode rejects on a property access.
@@ -68,21 +122,39 @@ function Resolve-Python {
         # started, and that is a terminating error here. Treat any failure as
         # "this interpreter is unusable" and keep looking.
         $usable = $false
+        $exitCode = $null
         try {
-            $null = & $command.Source @arguments 2>&1
-            $usable = $LASTEXITCODE -eq 0
+            $null = & $candidate.Path @arguments 2>&1
+            $exitCode = $LASTEXITCODE
+            $usable = $exitCode -eq 0
         }
         catch {
             $usable = $false
         }
         if ($usable) {
             return [pscustomobject]@{
-                Path = $command.Source
+                Path = $candidate.Path
                 Prefix = @($candidate.Prefix)
             }
         }
+        if ($PythonPath) {
+            $why = switch ($exitCode) {
+                3 { 'is 32-bit, and the bundled libusb-1.0.dll is x64' }
+                4 { 'is older than Python 3.9' }
+                default { 'cannot import pywin32 and pyusb' }
+            }
+            throw "The interpreter at -PythonPath $($why): $($candidate.Path)"
+        }
     }
-    throw 'No Python with pywin32 was found. Install it with: py -3 -m pip install pywin32'
+    throw @'
+No Python with pywin32 was found.
+
+Install Python for all users, then add the dependencies to that
+installation, for example:
+  "C:\Program Files\Python313\python.exe" -m pip install pywin32 pyusb
+
+Or pass -PythonPath to point at an interpreter that already has them.
+'@
 }
 
 # Identities expected to hold write access to a machine-wide installation.
