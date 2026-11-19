@@ -11,9 +11,21 @@ namespace NfcAuth
 {
     namespace
     {
+        // credentialprovider.h only declares these EXTERN_C, so define them here.
+        // A tile image tagged with the logo GUID and a large text tagged with the
+        // label GUID are what LogonUI shows in the "sign-in options" row.
+        // {2D837775-F6CD-464E-A745-482FD0B47493}
+        const GUID kFieldLogo =
+            { 0x2d837775, 0xf6cd, 0x464e, { 0xa7, 0x45, 0x48, 0x2f, 0xd0, 0xb4, 0x74, 0x93 } };
+        // {286BBFF3-BAD4-438F-B007-79B7267C3D48}
+        const GUID kFieldLabel =
+            { 0x286bbff3, 0xbad4, 0x438f, { 0xb0, 0x07, 0x79, 0xb7, 0x26, 0x7c, 0x3d, 0x48 } };
+
         const CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR kFieldDescriptors[FieldCount] =
         {
-            { FieldStatus, CPFT_LARGE_TEXT, const_cast<PWSTR>(L""), GUID_NULL },
+            { FieldTileImage, CPFT_TILE_IMAGE, const_cast<PWSTR>(L""), kFieldLogo },
+            { FieldLabel, CPFT_LARGE_TEXT, const_cast<PWSTR>(kTileLabel), kFieldLabel },
+            { FieldStatus, CPFT_SMALL_TEXT, const_cast<PWSTR>(L""), GUID_NULL },
             { FieldPassword, CPFT_PASSWORD_TEXT, const_cast<PWSTR>(kPasswordFieldLabel), GUID_NULL },
             { FieldSubmit, CPFT_SUBMIT_BUTTON, const_cast<PWSTR>(kSubmitFieldLabel), GUID_NULL }
         };

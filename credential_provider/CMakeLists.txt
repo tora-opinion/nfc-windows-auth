@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(NfcCredentialProvider LANGUAGES CXX)
+project(NfcCredentialProvider LANGUAGES CXX RC)
 
 if(NOT WIN32 OR NOT MSVC)
     message(FATAL_ERROR "NfcCredentialProvider requires MSVC on Windows")
@@ -19,7 +19,8 @@ function(nfc_release_output target)
 endfunction()
 
 function(nfc_harden_target target)
-    target_compile_options(${target} PRIVATE /W4 /WX /permissive- /EHsc /utf-8 /guard:cf)
+    target_compile_options(${target} PRIVATE
+        $<$<COMPILE_LANGUAGE:CXX>:/W4 /WX /permissive- /EHsc /utf-8 /guard:cf>)
     target_link_options(${target} PRIVATE /GUARD:CF /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA)
 endfunction()
 
@@ -30,11 +31,13 @@ add_library(NfcCredentialProvider SHARED
     src/PipeClient.cpp
     src/Provider.cpp
     src/SubmitFlow.cpp
+    src/NfcCredentialProvider.rc
     src/NfcAuthCredentialProvider.def
 )
 target_compile_definitions(NfcCredentialProvider PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 nfc_harden_target(NfcCredentialProvider)
-target_link_libraries(NfcCredentialProvider PRIVATE secur32 advapi32 ole32 shlwapi credui uuid)
+target_link_libraries(NfcCredentialProvider PRIVATE
+    secur32 advapi32 ole32 shlwapi credui uuid user32 gdi32)
 nfc_release_output(NfcCredentialProvider)
 set_target_properties(NfcCredentialProvider PROPERTIES OUTPUT_NAME "NfcCredentialProvider")
 

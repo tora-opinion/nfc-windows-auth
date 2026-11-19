@@ -102,6 +102,8 @@ namespace NfcAuth
         }
     }
 
+    HINSTANCE ModuleInstance() noexcept { return g_instance; }
+
     void ModuleObjectCreated() noexcept { InterlockedIncrement(&g_objectCount); }
     void ModuleObjectDestroyed() noexcept { InterlockedDecrement(&g_objectCount); }
     void ModuleWorkerStarted() noexcept { InterlockedIncrement(&g_liveWorkers); }

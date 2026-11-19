@@ -4,6 +4,7 @@
 #include "Module.h"
 #include "PipeClient.h"
 #include "Provider.h"
+#include "Resource.h"
 #include "Strings.h"
 #include "SubmitFlow.h"
 
@@ -388,7 +389,7 @@ namespace NfcAuth
 
         *state = CPFS_DISPLAY_IN_SELECTED_TILE;
         *interactiveState = CPFIS_NONE;
-        if (fieldId == FieldStatus)
+        if (fieldId == FieldTileImage || fieldId == FieldLabel || fieldId == FieldStatus)
         {
             *state = CPFS_DISPLAY_IN_BOTH;
             return S_OK;
@@ -416,6 +417,7 @@ namespace NfcAuth
     {
         if (!value) return E_POINTER;
         *value = nullptr;
+        if (fieldId == FieldLabel) return SHStrDupW(kTileLabel, value);
         if (fieldId != FieldStatus && fieldId != FieldPassword) return E_INVALIDARG;
         if (!lockInitialized_)
             return SHStrDupW(fieldId == FieldStatus ? kStatusUnavailable : L"", value);
@@ -431,11 +433,35 @@ namespace NfcAuth
         return hr;
     }
 
-    HRESULT Credential::GetBitmapValue(DWORD, HBITMAP* bitmap)
+    HRESULT Credential::GetBitmapValue(DWORD fieldId, HBITMAP* bitmap)
     {
         if (!bitmap) return E_POINTER;
         *bitmap = nullptr;
-        return E_NOTIMPL;
+        if (fieldId != FieldTileImage) return E_INVALIDARG;
+
+        int dpi = USER_DEFAULT_SCREEN_DPI;
+        if (HDC screen = GetDC(nullptr))
+        {
+            const int reported = GetDeviceCaps(screen, LOGPIXELSX);
+            if (reported > 0) dpi = reported;
+            ReleaseDC(nullptr, screen);
+        }
+
+        const int resource = dpi >= USER_DEFAULT_SCREEN_DPI * 3 / 2
+            ? IDB_NFC_TILE_192
+            : IDB_NFC_TILE_128;
+
+        // No LR_SHARED: the caller takes ownership of the handle and deletes it.
+        auto* loaded = static_cast<HBITMAP>(LoadImageW(
+            ModuleInstance(), MAKEINTRESOURCEW(resource), IMAGE_BITMAP, 0, 0,
+            LR_CREATEDIBSECTION));
+        if (!loaded)
+        {
+            const DWORD error = GetLastError();
+            return HRESULT_FROM_WIN32(error ? error : ERROR_NOT_FOUND);
+        }
+        *bitmap = loaded;
+        return S_OK;
     }
 
     HRESULT Credential::GetCheckboxValue(DWORD, BOOL*, LPWSTR*) { return E_NOTIMPL; }

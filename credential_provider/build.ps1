@@ -76,6 +76,12 @@ else {
 
     $common = @('/nologo','/std:c++17','/EHsc','/W4','/WX','/guard:cf','/permissive-','/utf-8',
                 '/DUNICODE','/D_UNICODE','/DWIN32_LEAN_AND_MEAN','/DNOMINMAX')
+    $res = Join-Path $buildDir 'NfcCredentialProvider.res'
+    $rc = Get-Command rc.exe -ErrorAction SilentlyContinue
+    if (-not $rc) { throw 'rc.exe was not found in the VS Developer environment.' }
+    & $rc.Source /nologo /fo $res (Join-Path $PSScriptRoot 'src\NfcCredentialProvider.rc')
+    if ($LASTEXITCODE -ne 0) { throw "Tile resource compilation failed with exit code $LASTEXITCODE." }
+
     $dll = Join-Path $buildDir 'NfcCredentialProvider.dll'
     & cl.exe @common '/LD' "/Fo$dllObj\" "/Fd$buildDir\NfcCredentialProvider.pdb" `
         "/Fe$dll" `
@@ -85,10 +91,11 @@ else {
         (Join-Path $PSScriptRoot 'src\PipeClient.cpp') `
         (Join-Path $PSScriptRoot 'src\Provider.cpp') `
         (Join-Path $PSScriptRoot 'src\SubmitFlow.cpp') `
+        $res `
         /link "/DEF:$(Join-Path $PSScriptRoot 'src\NfcAuthCredentialProvider.def')" `
         '/GUARD:CF' '/DYNAMICBASE' '/NXCOMPAT' '/HIGHENTROPYVA' `
         "/IMPLIB:$(Join-Path $buildDir 'NfcCredentialProvider.lib')" `
-        secur32.lib advapi32.lib ole32.lib shlwapi.lib credui.lib uuid.lib
+        secur32.lib advapi32.lib ole32.lib shlwapi.lib credui.lib uuid.lib user32.lib gdi32.lib
     if ($LASTEXITCODE -ne 0) { throw "Release x64 DLL build failed with exit code $LASTEXITCODE." }
 
     $kerbTest = Join-Path $buildDir 'test_kerb_pack.exe'
