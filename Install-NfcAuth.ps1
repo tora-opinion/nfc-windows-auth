@@ -58,10 +58,14 @@ function Get-PythonCandidates {
         whichever interpreter is chosen, so a per-user one is only a fallback
         and the caller is warned about it afterwards.
     #>
-    $candidates = @()
-    if ($PythonPath) { $candidates += @{ Path = $PythonPath; Prefix = @() } }
+    # An explicitly named interpreter is the whole list: falling back to
+    # another one would quietly install the service against a different
+    # environment than the administrator chose.
+    if ($PythonPath) { return @(@{ Path = $PythonPath; Prefix = @() }) }
 
-    foreach ($view in @('', 'WOW6432Node' + [char]92)) {
+    $candidates = @()
+
+    foreach ($view in @('', ('WOW6432Node' + [char]92))) {
         $root = 'HKLM:' + [char]92 + 'SOFTWARE' + [char]92 + $view + 'Python' + [char]92 + 'PythonCore'
         foreach ($version in (Get-ChildItem -Path $root -ErrorAction SilentlyContinue)) {
             $install = Get-ItemProperty -Path (Join-Path $version.PSPath 'InstallPath') -ErrorAction SilentlyContinue
@@ -89,7 +93,10 @@ function Get-PythonCandidates {
 
 function Resolve-Python {
     foreach ($candidate in (Get-PythonCandidates)) {
-        if (-not (Test-Path -LiteralPath $candidate.Path)) { continue }
+        if (-not (Test-Path -LiteralPath $candidate.Path)) {
+            if ($PythonPath) { throw "No interpreter at -PythonPath: $($candidate.Path)" }
+            continue
+        }
         $arguments = @($candidate.Prefix) + @('-c', 'import win32serviceutil')
         # The output is discarded rather than left on the pipeline, where it
         # would join this function's own output and turn the returned object
@@ -112,6 +119,9 @@ function Resolve-Python {
                 Path = $candidate.Path
                 Prefix = @($candidate.Prefix)
             }
+        }
+        if ($PythonPath) {
+            throw "The interpreter at -PythonPath cannot import pywin32: $($candidate.Path)"
         }
     }
     throw @'
