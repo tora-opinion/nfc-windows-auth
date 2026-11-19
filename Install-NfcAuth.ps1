@@ -97,7 +97,11 @@ function Resolve-Python {
             if ($PythonPath) { throw "No interpreter at -PythonPath: $($candidate.Path)" }
             continue
         }
-        $arguments = @($candidate.Prefix) + @('-c', 'import win32serviceutil')
+        # Both requirements in one probe. The bundled libusb-1.0.dll is an
+        # x64 binary, so a 32-bit interpreter would pass the pywin32 check and
+        # then fail to load the reader at runtime; exit 3 marks that case.
+        $probe = 'import sys, win32serviceutil; sys.exit(0 if sys.maxsize > 2**32 else 3)'
+        $arguments = @($candidate.Prefix) + @('-c', $probe)
         # The output is discarded rather than left on the pipeline, where it
         # would join this function's own output and turn the returned object
         # into an array that strict mode rejects on a property access.
@@ -107,9 +111,11 @@ function Resolve-Python {
         # started, and that is a terminating error here. Treat any failure as
         # "this interpreter is unusable" and keep looking.
         $usable = $false
+        $exitCode = $null
         try {
             $null = & $candidate.Path @arguments 2>&1
-            $usable = $LASTEXITCODE -eq 0
+            $exitCode = $LASTEXITCODE
+            $usable = $exitCode -eq 0
         }
         catch {
             $usable = $false
@@ -121,7 +127,13 @@ function Resolve-Python {
             }
         }
         if ($PythonPath) {
-            throw "The interpreter at -PythonPath cannot import pywin32: $($candidate.Path)"
+            $why = if ($exitCode -eq 3) {
+                'is 32-bit, and the bundled libusb-1.0.dll is x64'
+            }
+            else {
+                'cannot import pywin32'
+            }
+            throw "The interpreter at -PythonPath $($why): $($candidate.Path)"
         }
     }
     throw @'
