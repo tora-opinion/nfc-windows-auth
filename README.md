@@ -85,6 +85,8 @@ Use `clear-credential` to go back to typing it.
   service runs as LocalSystem and loads this interpreter, so a per-user
   installation would let anyone who can write to it run code as SYSTEM. The
   installer checks this and refuses unless `-AllowUnprotectedPython` is given.
+  It prefers a machine-wide installation when it finds one, and `-PythonPath`
+  points it at a specific interpreter.
 - Visual Studio 2022 with the C++ x64 toolset (to build the provider)
 - An iPhone with Express Card configured
 

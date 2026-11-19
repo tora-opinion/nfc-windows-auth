@@ -18,12 +18,17 @@
     Install even when the chosen Python installation can be modified
     without administrator rights. Doing so hands SYSTEM to anyone who can
     write to it.
+
+.PARAMETER PythonPath
+    Use this interpreter instead of searching. Point it at a machine-wide
+    installation that already has pywin32 and pyusb.
 #>
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
     [switch]$SkipBuild,
-    [switch]$AllowUnprotectedPython
+    [switch]$AllowUnprotectedPython,
+    [string]$PythonPath
 )
 
 Set-StrictMode -Version Latest
@@ -47,17 +52,44 @@ $legacyTasks = @('NFC Auth On Lock', 'NFC_Login_Unlock')
 function Write-Step { param([string]$Message) Write-Host "==> $Message" -ForegroundColor Cyan }
 function Write-Note { param([string]$Message) Write-Host "    $Message" -ForegroundColor DarkGray }
 
-function Resolve-Python {
+function Get-PythonCandidates {
+    <#
+        Machine-wide installations come first. The LocalSystem service loads
+        whichever interpreter is chosen, so a per-user one is only a fallback
+        and the caller is warned about it afterwards.
+    #>
+    $candidates = @()
+    if ($PythonPath) { $candidates += @{ Path = $PythonPath; Prefix = @() } }
+
+    foreach ($view in @('', 'WOW6432Node' + [char]92)) {
+        $root = 'HKLM:' + [char]92 + 'SOFTWARE' + [char]92 + $view + 'Python' + [char]92 + 'PythonCore'
+        foreach ($version in (Get-ChildItem -Path $root -ErrorAction SilentlyContinue)) {
+            $install = Get-ItemProperty -Path (Join-Path $version.PSPath 'InstallPath') -ErrorAction SilentlyContinue
+            if (-not $install) { continue }
+            $home_ = $install.'(default)'
+            if (-not $home_) { continue }
+            $exe = Join-Path $home_ 'python.exe'
+            if (Test-Path -LiteralPath $exe) { $candidates += @{ Path = $exe; Prefix = @() } }
+        }
+    }
+    foreach ($exe in (Get-ChildItem -Path (Join-Path $env:ProgramFiles 'Python*') -Directory -ErrorAction SilentlyContinue)) {
+        $full = Join-Path $exe.FullName 'python.exe'
+        if (Test-Path -LiteralPath $full) { $candidates += @{ Path = $full; Prefix = @() } }
+    }
+
     # Each prefix is carried explicitly: slicing a one-element array with
     # 1..($length - 1) yields the descending range 1,0 rather than nothing,
-    # which throws under Set-StrictMode and would abort on a machine that has
-    # python.exe but no py launcher.
-    foreach ($candidate in @(
-        @{ Command = 'py'; Prefix = @('-3') },
-        @{ Command = 'python'; Prefix = @() }
-    )) {
-        $command = Get-Command $candidate.Command -ErrorAction SilentlyContinue
-        if (-not $command) { continue }
+    # which throws under Set-StrictMode.
+    foreach ($name in @(@{ Command = 'py'; Prefix = @('-3') }, @{ Command = 'python'; Prefix = @() })) {
+        $command = Get-Command $name.Command -ErrorAction SilentlyContinue
+        if ($command) { $candidates += @{ Path = $command.Source; Prefix = $name.Prefix } }
+    }
+    return @($candidates)
+}
+
+function Resolve-Python {
+    foreach ($candidate in (Get-PythonCandidates)) {
+        if (-not (Test-Path -LiteralPath $candidate.Path)) { continue }
         $arguments = @($candidate.Prefix) + @('-c', 'import win32serviceutil')
         # The output is discarded rather than left on the pipeline, where it
         # would join this function's own output and turn the returned object
@@ -69,7 +101,7 @@ function Resolve-Python {
         # "this interpreter is unusable" and keep looking.
         $usable = $false
         try {
-            $null = & $command.Source @arguments 2>&1
+            $null = & $candidate.Path @arguments 2>&1
             $usable = $LASTEXITCODE -eq 0
         }
         catch {
@@ -77,12 +109,20 @@ function Resolve-Python {
         }
         if ($usable) {
             return [pscustomobject]@{
-                Path = $command.Source
+                Path = $candidate.Path
                 Prefix = @($candidate.Prefix)
             }
         }
     }
-    throw 'No Python with pywin32 was found. Install it with: py -3 -m pip install pywin32'
+    throw @'
+No Python with pywin32 was found.
+
+Install Python for all users, then add the dependencies to that
+installation, for example:
+  "C:\Program Files\Python313\python.exe" -m pip install pywin32 pyusb
+
+Or pass -PythonPath to point at an interpreter that already has them.
+'@
 }
 
 # Identities expected to hold write access to a machine-wide installation.
