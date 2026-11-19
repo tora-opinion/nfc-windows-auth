@@ -34,15 +34,37 @@ function Write-Step { param([string]$Message) Write-Host "==> $Message" -Foregro
 function Write-Note { param([string]$Message) Write-Host "    $Message" -ForegroundColor DarkGray }
 
 function Resolve-Python {
-    foreach ($candidate in @(@('py', '-3'), @('python'))) {
-        $command = Get-Command $candidate[0] -ErrorAction SilentlyContinue
+    # Each prefix is carried explicitly: slicing a one-element array with
+    # 1..($length - 1) yields the descending range 1,0 rather than nothing,
+    # which throws under Set-StrictMode and would abort on a machine that has
+    # python.exe but no py launcher.
+    foreach ($candidate in @(
+        @{ Command = 'py'; Prefix = @('-3') },
+        @{ Command = 'python'; Prefix = @() }
+    )) {
+        $command = Get-Command $candidate.Command -ErrorAction SilentlyContinue
         if (-not $command) { continue }
-        $arguments = @($candidate[1..($candidate.Length - 1)]) + @('-c', 'import win32serviceutil')
-        & $command.Source @arguments 2>$null
-        if ($LASTEXITCODE -eq 0) {
+        $arguments = @($candidate.Prefix) + @('-c', 'import win32serviceutil')
+        # The output is discarded rather than left on the pipeline, where it
+        # would join this function's own output and turn the returned object
+        # into an array that strict mode rejects on a property access.
+        #
+        # The probe is also allowed to fail outright: PATH often holds a
+        # Microsoft Store execution alias for python.exe that cannot even be
+        # started, and that is a terminating error here. Treat any failure as
+        # "this interpreter is unusable" and keep looking.
+        $usable = $false
+        try {
+            $null = & $command.Source @arguments 2>&1
+            $usable = $LASTEXITCODE -eq 0
+        }
+        catch {
+            $usable = $false
+        }
+        if ($usable) {
             return [pscustomobject]@{
                 Path = $command.Source
-                Prefix = @($candidate[1..($candidate.Length - 1)])
+                Prefix = @($candidate.Prefix)
             }
         }
     }
@@ -77,9 +99,12 @@ if (Test-Path -LiteralPath $dllTarget) {
     catch {
         Write-Note 'The DLL is still loaded; it will be deleted after a reboot.'
         $pending = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager'
-        $existing = (Get-ItemProperty -Path $pending -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue).PendingFileRenameOperations
-        $entry = @("\??\$dllTarget", '')
-        $values = if ($existing) { @($existing) + $entry } else { $entry }
+        # Silencing the lookup does not silence a property read on the $null it
+        # returns, which strict mode turns into a terminating error and would
+        # skip both the scheduled deletion and the cleanup below.
+        $current = Get-ItemProperty -Path $pending -Name 'PendingFileRenameOperations' -ErrorAction SilentlyContinue
+        $existing = if ($current) { @($current.PendingFileRenameOperations) } else { @() }
+        $values = $existing + @("\??\$dllTarget", '')
         Set-ItemProperty -Path $pending -Name 'PendingFileRenameOperations' -Value $values -Type MultiString
     }
 }
