@@ -1,6 +1,7 @@
 """Administrator CLI for registering and managing NFC cards."""
 
 import argparse
+import contextlib
 import ctypes
 import getpass
 import sys
@@ -26,6 +27,73 @@ from nfc_store import (
     save_credential,
 )
 from rcs300 import RCS300, ReaderError
+
+
+SERVICE_NAME = 'NfcAuthService'
+SERVICE_STOP_TIMEOUT_SEC = 45
+SERVICE_POLL_SEC = 0.25
+
+
+def _service_state():
+    """Return the service's current state, or None when it is not installed."""
+    try:
+        import win32serviceutil
+    except ImportError:
+        return None
+    try:
+        return win32serviceutil.QueryServiceStatus(SERVICE_NAME)[1]
+    except Exception:
+        return None
+
+
+def _wait_for_service_state(target, timeout_sec: float) -> bool:
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if _service_state() == target:
+            return True
+        time.sleep(SERVICE_POLL_SEC)
+    return _service_state() == target
+
+
+@contextlib.contextmanager
+def _reader_released():
+    """Stop the service for the duration so the reader can be opened here.
+
+    WinUSB lets only one application talk to the device at a time, and the
+    service holds interface 1 open for its whole polling loop, so enrolling a
+    card while it runs would simply fail.
+    """
+    import win32service
+    import win32serviceutil
+
+    was_running = _service_state() == win32service.SERVICE_RUNNING
+    if was_running:
+        print(f'Stopping {SERVICE_NAME} to free the reader...')
+        win32serviceutil.StopService(SERVICE_NAME)
+        if not _wait_for_service_state(
+            win32service.SERVICE_STOPPED, SERVICE_STOP_TIMEOUT_SEC
+        ):
+            raise RuntimeError(
+                f'{SERVICE_NAME} did not stop; stop it manually and try again'
+            )
+    try:
+        yield
+    finally:
+        if was_running:
+            try:
+                win32serviceutil.StartService(SERVICE_NAME)
+                print(f'Restarted {SERVICE_NAME}.')
+            except Exception as error:
+                # Never let a restart failure hide a successful enrolment, but
+                # do not leave the user guessing why taps stopped working.
+                print(
+                    f'WARNING: {SERVICE_NAME} could not be restarted: {error}',
+                    file=sys.stderr,
+                )
+                print(
+                    f'         Start it with: sc start {SERVICE_NAME}',
+                    file=sys.stderr,
+                )
 
 
 def _is_admin() -> bool:
@@ -141,7 +209,8 @@ def main(argv=None) -> int:
     try:
         _require_admin()
         if args.command == 'register':
-            mac = _register(args.name, args.windows_user, args.timeout)
+            with _reader_released():
+                mac = _register(args.name, args.windows_user, args.timeout)
             print(f'{args.name}\t{mac[:8]}')
         elif args.command == 'list':
             _print_cards()

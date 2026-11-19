@@ -164,6 +164,7 @@ class PipeServer(threading.Thread):
         name: str = DEFAULT_PIPE_NAME,
         sddl: str = DEFAULT_PIPE_SDDL,
         read_timeout_sec: float = 2,
+        response_timeout_sec: float = 2,
         clock: Optional[Callable[[], float]] = None,
         logger=None,
     ):
@@ -172,6 +173,7 @@ class PipeServer(threading.Thread):
         self.name = name
         self.sddl = sddl
         self.read_timeout_sec = read_timeout_sec
+        self.response_timeout_sec = response_timeout_sec
         self.clock = clock or time.monotonic
         self.logger = logger or logging.getLogger(__name__)
         self._stop_event = threading.Event()
@@ -266,12 +268,60 @@ class PipeServer(threading.Thread):
             return bytes(request)
         return None
 
+    def _write_response(self, pipe, win32file, pywintypes, response) -> bool:
+        """Write the whole response, tolerating this pipe's non-blocking mode."""
+        broken_pipe = getattr(pywintypes, 'ERROR_BROKEN_PIPE', 109)
+        no_data = getattr(pywintypes, 'ERROR_NO_DATA', 232)
+        view = memoryview(response)
+        deadline = self.clock() + self.response_timeout_sec
+        while view:
+            if self._stop_event.is_set() or self.clock() >= deadline:
+                return False
+            try:
+                _code, written = win32file.WriteFile(pipe, bytes(view))
+            except pywintypes.error as error:
+                code = self._error_code(error)
+                if code in (broken_pipe, no_data):
+                    return False
+                raise
+            if written:
+                view = view[written:]
+            else:
+                self._stop_event.wait(0.002)
+        return True
+
+    def _await_pickup(self, pipe, win32pipe, pywintypes) -> bool:
+        """Wait, briefly, for the client to finish with the connection.
+
+        DisconnectNamedPipe throws away whatever the client has not read yet,
+        and a completed WriteFile only means the bytes reached the pipe buffer.
+        The client reads its response and then closes, so a broken pipe is the
+        signal that the response was collected.
+
+        PeekNamedPipe is used rather than FlushFileBuffers because the latter
+        has no timeout: a client that stopped reading could wedge this thread
+        and, with it, the service's shutdown.
+        """
+        broken_pipe = getattr(pywintypes, 'ERROR_BROKEN_PIPE', 109)
+        deadline = self.clock() + self.response_timeout_sec
+        while not self._stop_event.is_set() and self.clock() < deadline:
+            try:
+                win32pipe.PeekNamedPipe(pipe, 0)
+            except pywintypes.error as error:
+                return self._error_code(error) == broken_pipe
+            self._stop_event.wait(0.002)
+        return False
+
     def _serve_connection(self, pipe, win32file, win32pipe, pywintypes):
         raw = self._read_request(pipe, win32file, pywintypes)
         if raw is None:
             return
         response = handle_request(raw, self.tap_state, now=self.clock())
-        win32file.WriteFile(pipe, response)
+        if not self._write_response(pipe, win32file, pywintypes, response):
+            self.logger.warning('The client went away before the response was sent')
+            return
+        if not self._await_pickup(pipe, win32pipe, pywintypes):
+            self.logger.warning('The client did not collect its response in time')
 
     def run(self):
         import pywintypes

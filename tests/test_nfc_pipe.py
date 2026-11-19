@@ -316,3 +316,108 @@ def test_pipe_server_uses_production_security_configuration(monkeypatch):
     assert isinstance(args[7], SecurityAttributes)
     assert args[7].SECURITY_DESCRIPTOR is descriptor
     assert args[7].bInheritHandle is False
+
+
+class _FakeError(Exception):
+    """Stands in for pywintypes.error, which carries its code in args[0]."""
+
+    def __init__(self, code):
+        super().__init__(code, 'fake', 'fake')
+        self.winerror = code
+
+
+_FAKE_PYWIN = SimpleNamespace(
+    error=_FakeError, ERROR_BROKEN_PIPE=109, ERROR_NO_DATA=232
+)
+
+
+def _server_with_short_timeout(response_timeout_sec=0.02):
+    # The polling loops wait in 2 ms steps, but Windows timer granularity
+    # rounds those up to roughly 15 ms, so tests that expect several
+    # iterations need a deadline well clear of that.
+    return PipeServer(TapState(), response_timeout_sec=response_timeout_sec)
+
+
+def test_write_response_sends_every_byte_through_partial_writes():
+    written = []
+
+    def write_file(_pipe, data):
+        # A non-blocking pipe may accept only part of a write.
+        written.append(data[:3])
+        return (0, min(3, len(data)))
+
+    server = _server_with_short_timeout(response_timeout_sec=2)
+    assert server._write_response(
+        None, SimpleNamespace(WriteFile=write_file), _FAKE_PYWIN, b'abcdefgh'
+    )
+    assert b''.join(written) == b'abcdefgh'
+
+
+def test_write_response_gives_up_when_the_client_disconnects():
+    def write_file(_pipe, _data):
+        raise _FakeError(109)
+
+    server = _server_with_short_timeout()
+    assert not server._write_response(
+        None, SimpleNamespace(WriteFile=write_file), _FAKE_PYWIN, b'payload'
+    )
+
+
+def test_write_response_stops_at_the_deadline_when_nothing_drains():
+    def write_file(_pipe, _data):
+        return (0, 0)
+
+    server = _server_with_short_timeout()
+    assert not server._write_response(
+        None, SimpleNamespace(WriteFile=write_file), _FAKE_PYWIN, b'payload'
+    )
+
+
+def test_write_response_reraises_unexpected_errors():
+    def write_file(_pipe, _data):
+        raise _FakeError(5)
+
+    server = _server_with_short_timeout()
+    with pytest.raises(_FakeError):
+        server._write_response(
+            None, SimpleNamespace(WriteFile=write_file), _FAKE_PYWIN, b'payload'
+        )
+
+
+def test_await_pickup_reports_success_once_the_client_closes():
+    calls = []
+
+    def peek(_pipe, _size):
+        calls.append(1)
+        if len(calls) < 3:
+            return (b'', 0, 0)
+        raise _FakeError(109)
+
+    server = _server_with_short_timeout(response_timeout_sec=2)
+    assert server._await_pickup(None, SimpleNamespace(PeekNamedPipe=peek), _FAKE_PYWIN)
+    assert len(calls) == 3
+
+
+def test_await_pickup_times_out_while_the_client_holds_the_response():
+    server = _server_with_short_timeout()
+    assert not server._await_pickup(
+        None, SimpleNamespace(PeekNamedPipe=lambda _p, _s: (b'', 0, 0)), _FAKE_PYWIN
+    )
+
+
+def test_await_pickup_treats_other_errors_as_a_failed_handover():
+    def peek(_pipe, _size):
+        raise _FakeError(5)
+
+    server = _server_with_short_timeout()
+    assert not server._await_pickup(
+        None, SimpleNamespace(PeekNamedPipe=peek), _FAKE_PYWIN
+    )
+
+
+def test_await_pickup_returns_immediately_once_stopping():
+    server = _server_with_short_timeout()
+    server.stop()
+    assert not server._await_pickup(
+        None, SimpleNamespace(PeekNamedPipe=lambda _p, _s: (b'', 0, 0)), _FAKE_PYWIN
+    )
