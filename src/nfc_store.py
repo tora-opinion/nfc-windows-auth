@@ -19,8 +19,14 @@ DEFAULT_CONFIG = {
     'tap_ttl_sec': 30,
     'libusb_path': None,
 }
-_FILE_SDDL = 'D:P(A;;FA;;;SY)(A;;FA;;;BA)'
-_DIRECTORY_SDDL = 'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+# The owner is set as well as the DACL. An owner keeps implicit permission to
+# rewrite the DACL, so a directory left owned by a standard user could simply
+# be reopened by them however tightly it was locked down.
+_FILE_SDDL = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)'
+_DIRECTORY_SDDL = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+
+# LocalSystem and the local Administrators group.
+_TRUSTED_OWNER_SIDS = frozenset({'S-1-5-18', 'S-1-5-32-544'})
 
 
 def get_data_dir() -> Path:
@@ -28,27 +34,71 @@ def get_data_dir() -> Path:
     return Path(os.environ.get('NFCAUTH_DATA_DIR') or DEFAULT_DATA_DIR)
 
 
-def _apply_protected_acl(path: Path, directory: bool = False):
-    """Restrict a data path to LocalSystem and the local Administrators group."""
+def _apply_protected_acl(path: Path, directory: bool = False,
+                         verify_existing: bool = False):
+    """Restrict a data path to LocalSystem and the local Administrators group.
+
+    With verify_existing, refuse the path outright when it, or anything
+    already inside it, belongs to someone else.
+    """
     import win32security
+
+    if verify_existing:
+        _reject_untrusted_state(path)
 
     descriptor = win32security.ConvertStringSecurityDescriptorToSecurityDescriptor(
         _DIRECTORY_SDDL if directory else _FILE_SDDL,
         win32security.SDDL_REVISION_1,
     )
     security_information = (
-        win32security.DACL_SECURITY_INFORMATION
+        win32security.OWNER_SECURITY_INFORMATION
+        | win32security.GROUP_SECURITY_INFORMATION
+        | win32security.DACL_SECURITY_INFORMATION
         | win32security.PROTECTED_DACL_SECURITY_INFORMATION
     )
     win32security.SetFileSecurity(str(path), security_information, descriptor)
 
 
+def _owner_sid(path: Path) -> Optional[str]:
+    """Return the SID string that owns a path, or None if it cannot be read."""
+    import win32security
+
+    try:
+        descriptor = win32security.GetFileSecurity(
+            str(path), win32security.OWNER_SECURITY_INFORMATION
+        )
+        return win32security.ConvertSidToStringSid(
+            descriptor.GetSecurityDescriptorOwner()
+        )
+    except Exception:
+        return None
+
+
+def _reject_untrusted_state(path: Path):
+    """Refuse to adopt state that a non-administrator could have planted.
+
+    Any user can create a directory under C:\ProgramData and becomes its
+    owner, which keeps them able to rewrite its DACL no matter what is applied
+    afterwards. They could then point libusb_path at a DLL of their choosing
+    and have the LocalSystem service load it.
+    """
+    suspects = [path] + sorted(path.iterdir()) if path.is_dir() else [path]
+    for suspect in suspects:
+        owner = _owner_sid(suspect)
+        if owner is not None and owner not in _TRUSTED_OWNER_SIDS:
+            raise PermissionError(
+                f'{suspect} is owned by {owner}, not by SYSTEM or the local '
+                'Administrators group. Delete it and run the installer again.'
+            )
+
+
 def ensure_data_dir(apply_acl: bool = True) -> Path:
     """Create the data directory and optionally apply its protected DACL."""
     path = get_data_dir()
+    existed = path.exists()
     path.mkdir(parents=True, exist_ok=True)
     if apply_acl:
-        _apply_protected_acl(path, directory=True)
+        _apply_protected_acl(path, directory=True, verify_existing=existed)
     return path
 
 

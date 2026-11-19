@@ -44,6 +44,8 @@ def test_acl_is_protected_and_grants_only_system_and_administrators(monkeypatch,
     calls = []
     fake_security = SimpleNamespace(
         SDDL_REVISION_1=1,
+        OWNER_SECURITY_INFORMATION=1,
+        GROUP_SECURITY_INFORMATION=2,
         DACL_SECURITY_INFORMATION=4,
         PROTECTED_DACL_SECURITY_INFORMATION=-2147483648,
         ConvertStringSecurityDescriptorToSecurityDescriptor=(
@@ -59,15 +61,16 @@ def test_acl_is_protected_and_grants_only_system_and_administrators(monkeypatch,
     nfc_store._apply_protected_acl(tmp_path, directory=True)
 
     assert calls[0] == (
-        'sddl', 'D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)',
+        'sddl', 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)',
         fake_security.SDDL_REVISION_1,
     )
-    assert calls[1][0:3] == ('set', str(tmp_path), -2147483644)
+    # Owner and group travel with the DACL: an owner can rewrite a DACL.
+    assert calls[1][0:3] == ('set', str(tmp_path), -2147483641)
 
     calls.clear()
     nfc_store._apply_protected_acl(tmp_path)
     assert calls[0] == (
-        'sddl', 'D:P(A;;FA;;;SY)(A;;FA;;;BA)',
+        'sddl', 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)',
         fake_security.SDDL_REVISION_1,
     )
 
@@ -88,7 +91,7 @@ def test_load_key_applies_acl_to_empty_temp_file_before_writing(tmp_path, monkey
     events = []
     original_fdopen = nfc_store.os.fdopen
 
-    def record_acl(path, directory=False):
+    def record_acl(path, directory=False, verify_existing=False):
         path = Path(path)
         if not directory:
             events.append(('acl', path, path.stat().st_size))
@@ -327,3 +330,54 @@ def test_load_credential_user_ignores_a_corrupt_blob(tmp_path, monkeypatch):
     ensure_data_dir(apply_acl=False)
     nfc_store.credential_path().write_bytes(b'not a dpapi blob')
     assert nfc_store.load_credential_user() is None
+
+
+def test_reject_untrusted_state_accepts_a_directory_owned_by_administrators(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(nfc_store, '_owner_sid', lambda _path: 'S-1-5-32-544')
+    nfc_store._reject_untrusted_state(tmp_path)
+
+
+def test_reject_untrusted_state_refuses_a_directory_a_user_pre_created(
+    tmp_path, monkeypatch
+):
+    # Any user may create a folder under C:\ProgramData and owns what they
+    # create, which keeps them able to rewrite its DACL afterwards.
+    monkeypatch.setattr(
+        nfc_store, '_owner_sid', lambda _path: 'S-1-5-21-1-2-3-1001'
+    )
+    with pytest.raises(PermissionError, match='owned by'):
+        nfc_store._reject_untrusted_state(tmp_path)
+
+
+def test_reject_untrusted_state_refuses_a_planted_file_in_a_sound_directory(
+    tmp_path, monkeypatch
+):
+    planted = tmp_path / 'config.json'
+    planted.write_text('{"libusb_path": "C:/Users/evil/evil.dll"}', encoding='utf-8')
+
+    def owner(path):
+        return 'S-1-5-21-1-2-3-1001' if Path(path) == planted else 'S-1-5-18'
+
+    monkeypatch.setattr(nfc_store, '_owner_sid', owner)
+    with pytest.raises(PermissionError, match='config.json'):
+        nfc_store._reject_untrusted_state(tmp_path)
+
+
+def test_ensure_data_dir_checks_ownership_only_for_a_directory_it_adopts(
+    tmp_path, monkeypatch
+):
+    seen = []
+    monkeypatch.setenv('NFCAUTH_DATA_DIR', str(tmp_path / 'state'))
+    monkeypatch.setattr(
+        nfc_store,
+        '_apply_protected_acl',
+        lambda path, directory=False, verify_existing=False: seen.append(verify_existing),
+    )
+
+    ensure_data_dir()
+    assert seen == [False]  # freshly created, nothing to inherit
+
+    ensure_data_dir()
+    assert seen == [False, True]  # already there, so its owner matters
