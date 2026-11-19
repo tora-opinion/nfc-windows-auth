@@ -47,15 +47,15 @@ namespace NfcAuth
                 return true;
             }
 
+            // A UPN is passed through whole, with no domain. Its prefix need
+            // not match the account's sAMAccountName and its suffix need not
+            // name the account's domain, so splitting it here would hand LSA a
+            // different account and reject a correct password.
             const size_t at = identity.find(L'@');
-            if (at != std::wstring::npos)
-            {
-                if (at == 0 || at + 1 == identity.size() ||
-                    identity.find(L'@', at + 1) != std::wstring::npos) return false;
-                *user = identity.substr(0, at);
-                *domain = identity.substr(at + 1);
-                return true;
-            }
+            if (at != std::wstring::npos &&
+                (at == 0 || at + 1 == identity.size() ||
+                 identity.find(L'@', at + 1) != std::wstring::npos))
+                return false;
 
             domain->clear();
             *user = identity;
