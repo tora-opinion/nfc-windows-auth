@@ -11,6 +11,7 @@ namespace NfcAuth
     inline constexpr wchar_t kSubmitFieldLabel[] = L"送信";
     inline constexpr wchar_t kStatusPrompt[] = L"iPhone をリーダーにかざしてください";
     inline constexpr wchar_t kStatusAuthenticated[] = L"iPhone を確認しました。パスワードを入力してください";
+    inline constexpr wchar_t kStatusSigningIn[] = L"サインインしています…";
     inline constexpr wchar_t kStatusUnavailable[] = L"NFC サービスに接続できません";
     inline constexpr wchar_t kStatusChecking[] = L"NFC 認証を確認しています。もう一度送信してください";
     inline constexpr wchar_t kStatusPasswordRequired[] = L"パスワードを入力してください";

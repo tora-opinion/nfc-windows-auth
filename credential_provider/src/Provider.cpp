@@ -40,7 +40,13 @@ namespace NfcAuth
 
     Provider::~Provider() noexcept
     {
-        if (credential_) credential_->Release();
+        if (credential_)
+        {
+            // Drop the back-pointer before the final release so a worker that is
+            // still winding down cannot call into a destroyed provider.
+            credential_->SetOwner(nullptr);
+            credential_->Release();
+        }
         if (users_) users_->Release();
         if (events_) events_->Release();
         ModuleObjectDestroyed();
@@ -134,12 +140,40 @@ namespace NfcAuth
         return S_OK;
     }
 
+    HRESULT Provider::MarshalEventsForWorker(IStream** stream, UINT_PTR* context) noexcept
+    {
+        if (!stream || !context) return E_POINTER;
+        *stream = nullptr;
+        *context = 0;
+        if (!events_) return E_NOT_VALID_STATE;
+
+        IStream* marshaled = nullptr;
+        const HRESULT hr = CoMarshalInterThreadInterfaceInStream(
+            IID_ICredentialProviderEvents, events_, &marshaled);
+        if (FAILED(hr))
+        {
+            if (marshaled) marshaled->Release();
+            return hr;
+        }
+        *stream = marshaled;
+        *context = adviseContext_;
+        return S_OK;
+    }
+
     HRESULT Provider::GetCredentialCount(DWORD* count, DWORD* defaultIndex, BOOL* autoLogon)
     {
         if (!count || !defaultIndex || !autoLogon) return E_POINTER;
         *count = 1;
         *defaultIndex = CREDENTIAL_PROVIDER_NO_DEFAULT;
         *autoLogon = FALSE;
+
+        // A tap only submits by itself once a stored credential has been matched
+        // to it. Without one the tile stays interactive and asks for a password.
+        if (credential_ && credential_->WantsAutoLogon())
+        {
+            *defaultIndex = 0;
+            *autoLogon = TRUE;
+        }
         return S_OK;
     }
 
@@ -148,6 +182,7 @@ namespace NfcAuth
         if (credential_) return S_OK;
         Credential* credential = new (std::nothrow) Credential();
         if (!credential) return E_OUTOFMEMORY;
+        credential->SetOwner(this);
         credential->SetUsageScenario(scenario_);
         credential->SetUserArray(users_);
         credential_ = credential;

@@ -72,7 +72,8 @@ else {
     $kerbObj = Join-Path $objRoot 'kerb-test'
     $pipeObj = Join-Path $objRoot 'pipe-test'
     $flowObj = Join-Path $objRoot 'flow-test'
-    New-Item -ItemType Directory -Path $dllObj,$kerbObj,$pipeObj,$flowObj -Force | Out-Null
+    $credObj = Join-Path $objRoot 'cred-test'
+    New-Item -ItemType Directory -Path $dllObj,$kerbObj,$pipeObj,$flowObj,$credObj -Force | Out-Null
 
     $common = @('/nologo','/std:c++17','/EHsc','/W4','/WX','/guard:cf','/permissive-','/utf-8',
                 '/DUNICODE','/D_UNICODE','/DWIN32_LEAN_AND_MEAN','/DNOMINMAX')
@@ -90,12 +91,13 @@ else {
         (Join-Path $PSScriptRoot 'src\KerbPack.cpp') `
         (Join-Path $PSScriptRoot 'src\PipeClient.cpp') `
         (Join-Path $PSScriptRoot 'src\Provider.cpp') `
+        (Join-Path $PSScriptRoot 'src\StoredCredential.cpp') `
         (Join-Path $PSScriptRoot 'src\SubmitFlow.cpp') `
         $res `
         /link "/DEF:$(Join-Path $PSScriptRoot 'src\NfcAuthCredentialProvider.def')" `
         '/GUARD:CF' '/DYNAMICBASE' '/NXCOMPAT' '/HIGHENTROPYVA' `
         "/IMPLIB:$(Join-Path $buildDir 'NfcCredentialProvider.lib')" `
-        secur32.lib advapi32.lib ole32.lib shlwapi.lib credui.lib uuid.lib user32.lib gdi32.lib
+        secur32.lib advapi32.lib ole32.lib shlwapi.lib credui.lib uuid.lib user32.lib gdi32.lib crypt32.lib shell32.lib
     if ($LASTEXITCODE -ne 0) { throw "Release x64 DLL build failed with exit code $LASTEXITCODE." }
 
     $kerbTest = Join-Path $buildDir 'test_kerb_pack.exe'
@@ -122,6 +124,15 @@ else {
     if ($LASTEXITCODE -ne 0) { throw "SubmitFlow test build failed with exit code $LASTEXITCODE." }
     & $flowTest
     if ($LASTEXITCODE -ne 0) { throw "SubmitFlow tests failed with exit code $LASTEXITCODE." }
+
+    $credTest = Join-Path $buildDir 'test_stored_credential.exe'
+    & cl.exe @common "/Fo$credObj\" "/Fe$credTest" `
+        (Join-Path $PSScriptRoot 'tests\test_stored_credential.cpp') `
+        (Join-Path $PSScriptRoot 'src\StoredCredential.cpp') `
+        (Join-Path $PSScriptRoot 'src\KerbPack.cpp') crypt32.lib shell32.lib ole32.lib
+    if ($LASTEXITCODE -ne 0) { throw "StoredCredential test build failed with exit code $LASTEXITCODE." }
+    & $credTest
+    if ($LASTEXITCODE -ne 0) { throw "StoredCredential tests failed with exit code $LASTEXITCODE." }
 }
 
 $dll = Join-Path $buildDir 'NfcCredentialProvider.dll'
@@ -149,6 +160,6 @@ if ($hardeningText -notmatch '(?im)^\s+CF instrumented\s*$' -or
 }
 
 Write-Host 'Credential Provider Release x64 build succeeded.'
-Write-Host 'KerbPack, PipeClient parser/harness, and SubmitFlow tests passed.'
+Write-Host 'KerbPack, PipeClient parser/harness, SubmitFlow, and StoredCredential tests passed.'
 Write-Host 'All four required DLL exports were found.'
 Write-Host 'Control Flow Guard and required DLL hardening flags were found.'

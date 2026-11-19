@@ -5,6 +5,7 @@
 #include "PipeClient.h"
 #include "Provider.h"
 #include "Resource.h"
+#include "StoredCredential.h"
 #include "Strings.h"
 #include "SubmitFlow.h"
 
@@ -122,7 +123,10 @@ namespace NfcAuth
         : refCount_(1), authService_(authService ? authService : &DefaultAuthService()),
           lockInitialized_(FALSE), scenario_(CPUS_INVALID), users_(nullptr),
           events_(nullptr), eventsStream_(nullptr), workerEvents_(nullptr),
-          pendingEvents_(nullptr), pendingEventsStream_(nullptr), workerThreadId_(0),
+          pendingEvents_(nullptr), pendingEventsStream_(nullptr), owner_(nullptr),
+          providerEventsStream_(nullptr), pendingProviderStream_(nullptr),
+          workerProviderEvents_(nullptr), providerAdviseContext_(0),
+          pendingProviderContext_(0), autoLogonArmed_(false), workerThreadId_(0),
           stopEvent_(nullptr), wakeEvent_(nullptr), pendingStopEvent_(nullptr),
           pendingWakeEvent_(nullptr), stopping_(true), workerRunning_(false),
           tapKnown_(false), tapTtlMs_(0), tapObservedAt_(0),
@@ -146,6 +150,13 @@ namespace NfcAuth
             IStream* eventsStream = eventsStream_;
             ICredentialProviderCredentialEvents* pendingEvents = pendingEvents_;
             IStream* pendingEventsStream = pendingEventsStream_;
+            IStream* providerStream = providerEventsStream_;
+            IStream* pendingProviderStream = pendingProviderStream_;
+            ICredentialProviderEvents* workerProviderEvents = workerProviderEvents_;
+            providerEventsStream_ = nullptr;
+            pendingProviderStream_ = nullptr;
+            workerProviderEvents_ = nullptr;
+            owner_ = nullptr;
             HANDLE pendingStopEvent = pendingStopEvent_;
             HANDLE pendingWakeEvent = pendingWakeEvent_;
             users_ = nullptr;
@@ -163,6 +174,9 @@ namespace NfcAuth
             if (eventsStream) eventsStream->Release();
             if (pendingEvents) pendingEvents->Release();
             if (pendingEventsStream) pendingEventsStream->Release();
+            if (providerStream) providerStream->Release();
+            if (pendingProviderStream) pendingProviderStream->Release();
+            if (workerProviderEvents) workerProviderEvents->Release();
             if (pendingStopEvent) CloseHandle(pendingStopEvent);
             if (pendingWakeEvent) CloseHandle(pendingWakeEvent);
             DeleteCriticalSection(&lock_);
@@ -216,12 +230,23 @@ namespace NfcAuth
             return S_OK;
         }
 
+        // Optional: without it the tile still works, it just never submits by itself.
+        IStream* marshaledProvider = nullptr;
+        UINT_PTR providerContext = 0;
+        if (owner_ && FAILED(owner_->MarshalEventsForWorker(&marshaledProvider, &providerContext)))
+        {
+            if (marshaledProvider) marshaledProvider->Release();
+            marshaledProvider = nullptr;
+            providerContext = 0;
+        }
+
         HANDLE stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         HANDLE wakeEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         if (!stopEvent || !wakeEvent)
         {
             if (stopEvent) CloseHandle(stopEvent);
             if (wakeEvent) CloseHandle(wakeEvent);
+            if (marshaledProvider) marshaledProvider->Release();
             if (marshaledEvents) marshaledEvents->Release();
             SetDisplayStatus(kStatusUnavailable, false);
             return S_OK;
@@ -242,12 +267,15 @@ namespace NfcAuth
                 LeaveCriticalSection(&lock_);
                 events->Release();
                 marshaledEvents->Release();
+                if (marshaledProvider) marshaledProvider->Release();
                 CloseHandle(stopEvent);
                 CloseHandle(wakeEvent);
                 return E_PENDING;
             }
             pendingEvents_ = events;
             pendingEventsStream_ = marshaledEvents;
+            pendingProviderStream_ = marshaledProvider;
+            pendingProviderContext_ = providerContext;
             pendingStopEvent_ = stopEvent;
             pendingWakeEvent_ = wakeEvent;
             LeaveCriticalSection(&lock_);
@@ -263,8 +291,14 @@ namespace NfcAuth
         pendingEventsStream_ = nullptr;
         pendingStopEvent_ = nullptr;
         pendingWakeEvent_ = nullptr;
+        IStream* staleProviderStream = providerEventsStream_;
+        IStream* stalePendingProviderStream = pendingProviderStream_;
+        pendingProviderStream_ = nullptr;
+        pendingProviderContext_ = 0;
         events_ = events;
         eventsStream_ = marshaledEvents;
+        providerEventsStream_ = marshaledProvider;
+        providerAdviseContext_ = providerContext;
         stopEvent_ = stopEvent;
         wakeEvent_ = wakeEvent;
         stopping_ = false;
@@ -276,6 +310,8 @@ namespace NfcAuth
         if (oldStream) oldStream->Release();
         if (stalePendingEvents) stalePendingEvents->Release();
         if (stalePendingStream) stalePendingStream->Release();
+        if (staleProviderStream) staleProviderStream->Release();
+        if (stalePendingProviderStream) stalePendingProviderStream->Release();
         if (stalePendingStopEvent) CloseHandle(stalePendingStopEvent);
         if (stalePendingWakeEvent) CloseHandle(stalePendingWakeEvent);
 
@@ -291,11 +327,15 @@ namespace NfcAuth
             wakeEvent_ = nullptr;
             IStream* unusedStream = eventsStream_;
             eventsStream_ = nullptr;
+            IStream* unusedProviderStream = providerEventsStream_;
+            providerEventsStream_ = nullptr;
+            providerAdviseContext_ = 0;
             ICredentialProviderCredentialEvents* unusedEvents = events_;
             events_ = nullptr;
             LeaveCriticalSection(&lock_);
             CloseHandle(stopEvent);
             CloseHandle(wakeEvent);
+            if (unusedProviderStream) unusedProviderStream->Release();
             if (unusedStream) unusedStream->Release();
             if (unusedEvents) unusedEvents->Release();
             SetDisplayStatus(kStatusUnavailable, false);
@@ -322,6 +362,9 @@ namespace NfcAuth
         pendingEvents_ = nullptr;
         IStream* pendingEventsStream = pendingEventsStream_;
         pendingEventsStream_ = nullptr;
+        IStream* pendingProviderStream = pendingProviderStream_;
+        pendingProviderStream_ = nullptr;
+        pendingProviderContext_ = 0;
         HANDLE pendingStopEvent = pendingStopEvent_;
         pendingStopEvent_ = nullptr;
         HANDLE pendingWakeEvent = pendingWakeEvent_;
@@ -334,6 +377,7 @@ namespace NfcAuth
         if (eventsStream) eventsStream->Release();
         if (pendingEvents) pendingEvents->Release();
         if (pendingEventsStream) pendingEventsStream->Release();
+        if (pendingProviderStream) pendingProviderStream->Release();
         if (pendingStopEvent) CloseHandle(pendingStopEvent);
         if (pendingWakeEvent) CloseHandle(pendingWakeEvent);
         return S_OK;
@@ -508,6 +552,69 @@ namespace NfcAuth
     HRESULT Credential::SetComboBoxSelectedValue(DWORD, DWORD) { return E_NOTIMPL; }
     HRESULT Credential::CommandLinkClicked(DWORD) { return E_NOTIMPL; }
 
+    void Credential::SetOwner(Provider* owner) noexcept
+    {
+        if (!lockInitialized_)
+        {
+            owner_ = owner;
+            return;
+        }
+        EnterCriticalSection(&lock_);
+        owner_ = owner;
+        LeaveCriticalSection(&lock_);
+    }
+
+    bool Credential::WantsAutoLogon() noexcept
+    {
+        if (!lockInitialized_) return false;
+        const ULONGLONG now = GetTickCount64();
+        EnterCriticalSection(&lock_);
+        const bool wants = autoLogonArmed_ && IsTapCurrentLocked(now) && !password_.empty();
+        LeaveCriticalSection(&lock_);
+        return wants;
+    }
+
+    // Worker-thread only: the sink is a proxy marshaled for this apartment.
+    void Credential::RequestAutoLogon() noexcept
+    {
+        if (!lockInitialized_) return;
+        ICredentialProviderEvents* events = nullptr;
+        UINT_PTR context = 0;
+        EnterCriticalSection(&lock_);
+        if (!stopping_ && GetCurrentThreadId() == workerThreadId_)
+        {
+            events = workerProviderEvents_;
+            context = providerAdviseContext_;
+            if (events) events->AddRef();
+        }
+        LeaveCriticalSection(&lock_);
+        if (!events) return;
+        events->CredentialsChanged(context);
+        events->Release();
+    }
+
+    // Caller holds lock_. Arms only when the stored credential belongs to the
+    // very account the tapped card is registered against.
+    bool Credential::ArmAutoLogonLocked(const std::wstring& tapUser,
+                                        const std::wstring& storedUser,
+                                        const std::wstring& storedPassword) noexcept
+    {
+        if (tapUser.empty() || storedUser.empty() || storedPassword.empty()) return false;
+        if (CompareStringOrdinal(tapUser.c_str(), -1, storedUser.c_str(), -1, TRUE) != CSTR_EQUAL)
+            return false;
+        try
+        {
+            password_ = storedPassword;
+        }
+        catch (...)
+        {
+            ClearPasswordLocked();
+            return false;
+        }
+        autoLogonArmed_ = true;
+        return true;
+    }
+
     bool Credential::IsTapCurrentLocked(ULONGLONG now) const noexcept
     {
         return tapKnown_ && (consumed_ || (now >= tapObservedAt_ && now - tapObservedAt_ < tapTtlMs_));
@@ -515,6 +622,7 @@ namespace NfcAuth
 
     void Credential::ClearTapLocked() noexcept
     {
+        autoLogonArmed_ = false;
         tapKnown_ = false;
         tapUser_.clear();
         tapNonce_.clear();
@@ -580,7 +688,22 @@ namespace NfcAuth
     {
         bool changed = false;
         bool visible = false;
+        bool armed = false;
         std::wstring status;
+
+        // Loaded outside the lock: it touches the disk and DPAPI, and
+        // GetSerialization must not block behind that on the UI thread.
+        std::wstring storedUser;
+        SecureWString storedPassword;
+        if (result.kind == PipeResultKind::Tap)
+        {
+            if (!LoadStoredCredential(&storedUser, &storedPassword.value))
+            {
+                storedUser.clear();
+                storedPassword.value.clear();
+            }
+        }
+
         try
         {
             if (!lockInitialized_) return;
@@ -605,8 +728,17 @@ namespace NfcAuth
                 tapNonce_ = std::move(result.nonce);
                 tapTtlMs_ = result.ttlMs;
                 tapObservedAt_ = GetTickCount64();
-                passwordVisible_ = true;
-                statusText_ = kStatusAuthenticated;
+                if (ArmAutoLogonLocked(tapUser_, storedUser, storedPassword.value))
+                {
+                    passwordVisible_ = false;
+                    statusText_ = kStatusSigningIn;
+                    armed = true;
+                }
+                else
+                {
+                    passwordVisible_ = true;
+                    statusText_ = kStatusAuthenticated;
+                }
             }
             else if (result.kind == PipeResultKind::NoTap)
             {
@@ -647,12 +779,14 @@ namespace NfcAuth
             return;
         }
         if (changed) NotifyFields(status, visible, true);
+        if (armed) RequestAutoLogon();
     }
 
     void Credential::ApplyConsumeResult(const std::string& nonce, PipeResult result) noexcept
     {
         bool changed = false;
         bool visible = false;
+        bool resumeAutoLogon = false;
         std::wstring status;
         try
         {
@@ -671,8 +805,17 @@ namespace NfcAuth
                 {
                     consumed_ = true;
                     failureStatus_ = false;
-                    statusText_ = kStatusAuthenticated;
-                    passwordVisible_ = true;
+                    if (autoLogonArmed_)
+                    {
+                        statusText_ = kStatusSigningIn;
+                        passwordVisible_ = false;
+                        resumeAutoLogon = true;
+                    }
+                    else
+                    {
+                        statusText_ = kStatusAuthenticated;
+                        passwordVisible_ = true;
+                    }
                 }
                 else
                 {
@@ -695,6 +838,7 @@ namespace NfcAuth
             return;
         }
         if (changed) NotifyFields(status, visible, true);
+        if (resumeAutoLogon) RequestAutoLogon();
     }
 
     /*
@@ -721,10 +865,35 @@ namespace NfcAuth
     {
         const HRESULT comResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
         IStream* marshaledEvents = nullptr;
+        IStream* marshaledProvider = nullptr;
         EnterCriticalSection(&lock_);
         marshaledEvents = eventsStream_;
         eventsStream_ = nullptr;
+        marshaledProvider = providerEventsStream_;
+        providerEventsStream_ = nullptr;
         workerThreadId_ = GetCurrentThreadId();
+        LeaveCriticalSection(&lock_);
+
+        ICredentialProviderEvents* workerProviderEvents = nullptr;
+        if (marshaledProvider)
+        {
+            if (SUCCEEDED(comResult))
+            {
+                if (FAILED(CoGetInterfaceAndReleaseStream(marshaledProvider,
+                        IID_ICredentialProviderEvents,
+                        reinterpret_cast<void**>(&workerProviderEvents))) && workerProviderEvents)
+                {
+                    workerProviderEvents->Release();
+                    workerProviderEvents = nullptr;
+                }
+            }
+            else
+            {
+                marshaledProvider->Release();
+            }
+        }
+        EnterCriticalSection(&lock_);
+        workerProviderEvents_ = workerProviderEvents;
         LeaveCriticalSection(&lock_);
 
         ICredentialProviderCredentialEvents* workerEvents = nullptr;
@@ -802,6 +971,11 @@ namespace NfcAuth
         EnterCriticalSection(&lock_);
         workerEvents = workerEvents_;
         workerEvents_ = nullptr;
+        ICredentialProviderEvents* providerEvents = workerProviderEvents_;
+        workerProviderEvents_ = nullptr;
+        IStream* remainingProviderStream = providerEventsStream_;
+        providerEventsStream_ = nullptr;
+        providerAdviseContext_ = 0;
         workerThreadId_ = 0;
         HANDLE stopEvent = stopEvent_;
         HANDLE wakeEvent = wakeEvent_;
@@ -812,7 +986,9 @@ namespace NfcAuth
         workerRunning_ = false;
         LeaveCriticalSection(&lock_);
         if (workerEvents) workerEvents->Release();
+        if (providerEvents) providerEvents->Release();
         if (remainingStream) remainingStream->Release();
+        if (remainingProviderStream) remainingProviderStream->Release();
         if (stopEvent) CloseHandle(stopEvent);
         if (wakeEvent) CloseHandle(wakeEvent);
         if (SUCCEEDED(comResult)) CoUninitialize();
@@ -827,10 +1003,14 @@ namespace NfcAuth
         {
             events_ = pendingEvents_;
             eventsStream_ = pendingEventsStream_;
+            providerEventsStream_ = pendingProviderStream_;
+            providerAdviseContext_ = pendingProviderContext_;
             stopEvent_ = pendingStopEvent_;
             wakeEvent_ = pendingWakeEvent_;
             pendingEvents_ = nullptr;
             pendingEventsStream_ = nullptr;
+            pendingProviderStream_ = nullptr;
+            pendingProviderContext_ = 0;
             pendingStopEvent_ = nullptr;
             pendingWakeEvent_ = nullptr;
             stopEvent = stopEvent_;
@@ -855,11 +1035,14 @@ namespace NfcAuth
         EnterCriticalSection(&lock_);
         ICredentialProviderCredentialEvents* unusedEvents = events_;
         IStream* unusedStream = eventsStream_;
+        IStream* unusedProviderStream = providerEventsStream_;
         const bool ownsEvents = stopEvent_ == stopEvent;
         if (ownsEvents)
         {
             events_ = nullptr;
             eventsStream_ = nullptr;
+            providerEventsStream_ = nullptr;
+            providerAdviseContext_ = 0;
             stopEvent_ = nullptr;
             wakeEvent_ = nullptr;
             workerRunning_ = false;
@@ -870,6 +1053,7 @@ namespace NfcAuth
         {
             if (unusedEvents) unusedEvents->Release();
             if (unusedStream) unusedStream->Release();
+            if (unusedProviderStream) unusedProviderStream->Release();
             if (stopEvent) CloseHandle(stopEvent);
             if (wakeEvent) CloseHandle(wakeEvent);
         }
@@ -885,7 +1069,8 @@ namespace NfcAuth
         {
             const std::wstring_view value = text ? std::wstring_view(text) : std::wstring_view();
             const bool informational = value == kStatusPrompt || value == kStatusChecking ||
-                                       value == kStatusAuthenticated || value == kStatusPasswordRequired;
+                                       value == kStatusAuthenticated || value == kStatusPasswordRequired ||
+                                       value == kStatusSigningIn;
             *statusIcon = informational ? CPSI_NONE : CPSI_ERROR;
         }
         if (statusText && text) SHStrDupW(text, statusText);
@@ -1145,6 +1330,9 @@ namespace NfcAuth
         {
             EnterCriticalSection(&lock_);
             ClearPasswordLocked();
+            // LSA rejected the stored secret, so fall back to the typed password
+            // instead of resubmitting the same credential forever.
+            autoLogonArmed_ = false;
             LeaveCriticalSection(&lock_);
         }
         return S_OK;

@@ -250,3 +250,80 @@ def test_remove_card_removes_only_the_named_registration(tmp_path, monkeypatch):
     assert remove_card('Missing') is False
     assert find_card('a' * 64) is None
     assert find_card('b' * 64)['name'] == 'Home'
+
+
+def _decrypt_credential(path):
+    """Decrypt a stored credential blob the way the Credential Provider does."""
+    import win32crypt
+
+    _description, record = win32crypt.CryptUnprotectData(
+        path.read_bytes(), nfc_store._CREDENTIAL_ENTROPY, None, None, 0
+    )
+    return record
+
+
+def test_save_credential_round_trips_through_dpapi(tmp_path, monkeypatch):
+    _use_data_dir(monkeypatch, tmp_path / 'state')
+    nfc_store.save_credential(r'MicrosoftAccount\someone@example.com', 'pa ss:word')
+
+    # The provider splits on the first newline, so the record must be exactly
+    # "<qualified user>\n<password>" encoded as UTF-8.
+    assert _decrypt_credential(nfc_store.credential_path()) == (
+        (r'MicrosoftAccount\someone@example.com' + '\npa ss:word').encode('utf-8')
+    )
+    assert nfc_store.load_credential_user() == r'MicrosoftAccount\someone@example.com'
+
+
+def test_save_credential_keeps_a_password_containing_a_newline(tmp_path, monkeypatch):
+    _use_data_dir(monkeypatch, tmp_path / 'state')
+    nfc_store.save_credential(r'.\local', 'first\nsecond')
+
+    # Only the first newline separates the fields, so the password survives.
+    assert nfc_store.load_credential_user() == r'.\local'
+    assert _decrypt_credential(nfc_store.credential_path()).decode('utf-8') == (
+        r'.\local' + '\nfirst\nsecond'
+    )
+
+
+def test_save_credential_overwrites_without_leaving_temporary_files(tmp_path, monkeypatch):
+    _use_data_dir(monkeypatch, tmp_path / 'state')
+    nfc_store.save_credential(r'.\local', 'first')
+    nfc_store.save_credential(r'.\other', 'second')
+
+    assert nfc_store.load_credential_user() == r'.\other'
+    leftovers = [item.name for item in get_data_dir().iterdir() if item.suffix == '.tmp']
+    assert leftovers == []
+
+
+@pytest.mark.parametrize(
+    'user, password',
+    [
+        ('', 'secret'),
+        ('   ', 'secret'),
+        ('bad\nuser', 'secret'),
+        ('bad\x00user', 'secret'),
+        (r'.\local', ''),
+    ],
+)
+def test_save_credential_rejects_unusable_input(tmp_path, monkeypatch, user, password):
+    _use_data_dir(monkeypatch, tmp_path / 'state')
+    with pytest.raises(ValueError):
+        nfc_store.save_credential(user, password)
+    assert not nfc_store.credential_path().exists()
+
+
+def test_credential_helpers_handle_a_missing_blob(tmp_path, monkeypatch):
+    _use_data_dir(monkeypatch, tmp_path / 'state')
+    assert nfc_store.load_credential_user() is None
+    assert nfc_store.clear_credential() is False
+
+    nfc_store.save_credential(r'.\local', 'secret')
+    assert nfc_store.clear_credential() is True
+    assert nfc_store.load_credential_user() is None
+
+
+def test_load_credential_user_ignores_a_corrupt_blob(tmp_path, monkeypatch):
+    _use_data_dir(monkeypatch, tmp_path / 'state')
+    ensure_data_dir(apply_acl=False)
+    nfc_store.credential_path().write_bytes(b'not a dpapi blob')
+    assert nfc_store.load_credential_user() is None

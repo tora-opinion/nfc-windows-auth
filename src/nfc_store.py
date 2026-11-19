@@ -213,3 +213,91 @@ def find_card(mac: str) -> Optional[dict]:
     """Find a registered card by its HMAC identifier."""
     card = load_cards().get(mac)
     return dict(card) if isinstance(card, dict) else None
+
+
+CREDENTIAL_FILENAME = 'credential.dpapi'
+
+# Matches kEntropy in credential_provider/src/StoredCredential.cpp. This is not
+# a secret; it only scopes the blob so an unrelated machine-scope DPAPI blob
+# cannot be substituted for this one.
+_CREDENTIAL_ENTROPY = b'NfcAuth.Credential.v1'
+_CRYPTPROTECT_LOCAL_MACHINE = 0x4
+
+
+def credential_path() -> Path:
+    """Return the path of the optional auto sign-in credential blob."""
+    return get_data_dir() / CREDENTIAL_FILENAME
+
+
+def save_credential(windows_user: str, password: str):
+    """Encrypt the auto sign-in credential for the Credential Provider.
+
+    The blob is machine-scoped on purpose: LogonUI runs as LocalSystem and has
+    no user profile to unprotect a user-scoped blob with. Its DACL is therefore
+    the only thing keeping it away from non-administrators.
+    """
+    import win32crypt
+
+    if not isinstance(windows_user, str) or not windows_user.strip():
+        raise ValueError('windows_user must be a non-empty string')
+    if '\n' in windows_user or '\x00' in windows_user:
+        raise ValueError('windows_user must not contain newlines or null characters')
+    if not isinstance(password, str) or not password:
+        raise ValueError('password must be a non-empty string')
+
+    record = f'{windows_user.strip()}\n{password}'.encode('utf-8')
+    blob = win32crypt.CryptProtectData(
+        record, None, _CREDENTIAL_ENTROPY, None, None, _CRYPTPROTECT_LOCAL_MACHINE
+    )
+
+    directory = ensure_data_dir()
+    target = directory / CREDENTIAL_FILENAME
+    temp_path = directory / f'.{CREDENTIAL_FILENAME}.{uuid.uuid4().hex}.tmp'
+    try:
+        with temp_path.open('xb') as blob_file:
+            # The directory DACL is inheritable, but set the explicit protected
+            # file DACL before any ciphertext reaches the disk.
+            _apply_protected_acl(temp_path)
+            blob_file.write(blob)
+            blob_file.flush()
+            os.fsync(blob_file.fileno())
+        os.replace(temp_path, target)
+    except Exception:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def load_credential_user() -> Optional[str]:
+    """Return the account the stored credential belongs to, if there is one."""
+    import win32crypt
+
+    path = credential_path()
+    try:
+        blob = path.read_bytes()
+    except OSError:
+        return None
+    if not blob:
+        return None
+    try:
+        _description, record = win32crypt.CryptUnprotectData(
+            blob, _CREDENTIAL_ENTROPY, None, None, 0
+        )
+    except Exception:
+        return None
+    text = record.decode('utf-8', errors='replace')
+    user, separator, _password = text.partition('\n')
+    if not separator or not user:
+        return None
+    return user
+
+
+def clear_credential() -> bool:
+    """Remove the stored credential, returning whether one was present."""
+    try:
+        credential_path().unlink()
+        return True
+    except FileNotFoundError:
+        return False

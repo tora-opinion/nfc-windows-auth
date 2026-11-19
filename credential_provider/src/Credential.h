@@ -8,6 +8,7 @@
 namespace NfcAuth
 {
     class IAuthService;
+    class Provider;
 
     class Credential final : public IConnectableCredentialProviderCredential
     {
@@ -49,6 +50,13 @@ namespace NfcAuth
         void SetUsageScenario(CREDENTIAL_PROVIDER_USAGE_SCENARIO scenario) noexcept;
         void SetUserArray(ICredentialProviderUserArray* users) noexcept;
 
+        // Set by the owning provider; cleared before it releases this object.
+        void SetOwner(Provider* owner) noexcept;
+
+        // True once a tap has been matched to a stored credential, which is what
+        // lets the provider report auto-logon for this tile.
+        bool WantsAutoLogon() noexcept;
+
     private:
         ~Credential() noexcept;
         static DWORD WINAPI WorkerEntry(void* context) noexcept;
@@ -57,6 +65,9 @@ namespace NfcAuth
         void ApplyStatusResult(struct PipeResult result) noexcept;
         void ApplyConsumeResult(const std::string& nonce, struct PipeResult result) noexcept;
         void SetDisplayStatus(const wchar_t* status, bool passwordVisible) noexcept;
+        void RequestAutoLogon() noexcept;
+        bool ArmAutoLogonLocked(const std::wstring& tapUser, const std::wstring& storedUser,
+                                const std::wstring& storedPassword) noexcept;
         void NotifyFields(const std::wstring& status, bool passwordVisible,
                           bool changed) noexcept;
         bool IsTapCurrentLocked(ULONGLONG now) const noexcept;
@@ -77,6 +88,13 @@ namespace NfcAuth
         ICredentialProviderCredentialEvents* workerEvents_;
         ICredentialProviderCredentialEvents* pendingEvents_;
         IStream* pendingEventsStream_;
+        Provider* owner_;
+        IStream* providerEventsStream_;
+        IStream* pendingProviderStream_;
+        ICredentialProviderEvents* workerProviderEvents_;
+        UINT_PTR providerAdviseContext_;
+        UINT_PTR pendingProviderContext_;
+        bool autoLogonArmed_;
         DWORD workerThreadId_;
         HANDLE stopEvent_;
         HANDLE wakeEvent_;

@@ -30,6 +30,7 @@ add_library(NfcCredentialProvider SHARED
     src/KerbPack.cpp
     src/PipeClient.cpp
     src/Provider.cpp
+    src/StoredCredential.cpp
     src/SubmitFlow.cpp
     src/NfcCredentialProvider.rc
     src/NfcAuthCredentialProvider.def
@@ -37,7 +38,7 @@ add_library(NfcCredentialProvider SHARED
 target_compile_definitions(NfcCredentialProvider PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 nfc_harden_target(NfcCredentialProvider)
 target_link_libraries(NfcCredentialProvider PRIVATE
-    secur32 advapi32 ole32 shlwapi credui uuid user32 gdi32)
+    secur32 advapi32 ole32 shlwapi credui uuid user32 gdi32 crypt32 shell32)
 nfc_release_output(NfcCredentialProvider)
 set_target_properties(NfcCredentialProvider PROPERTIES OUTPUT_NAME "NfcCredentialProvider")
 
@@ -70,7 +71,18 @@ nfc_harden_target(test_submit_flow)
 target_link_libraries(test_submit_flow PRIVATE ole32)
 nfc_release_output(test_submit_flow)
 
+add_executable(test_stored_credential
+    tests/test_stored_credential.cpp
+    src/StoredCredential.cpp
+    src/KerbPack.cpp
+)
+target_compile_definitions(test_stored_credential PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+nfc_harden_target(test_stored_credential)
+target_link_libraries(test_stored_credential PRIVATE crypt32 shell32 ole32)
+nfc_release_output(test_stored_credential)
+
 enable_testing()
 add_test(NAME kerb_pack COMMAND $<TARGET_FILE:test_kerb_pack>)
 add_test(NAME pipe_client_parse COMMAND $<TARGET_FILE:test_pipe_client_parse>)
 add_test(NAME submit_flow COMMAND $<TARGET_FILE:test_submit_flow>)
+add_test(NAME stored_credential COMMAND $<TARGET_FILE:test_stored_credential>)

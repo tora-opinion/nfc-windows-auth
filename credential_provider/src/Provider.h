@@ -1,6 +1,7 @@
 #pragma once
 
 #include <windows.h>
+#include <objidl.h>
 #include <credentialprovider.h>
 
 namespace NfcAuth
@@ -33,6 +34,11 @@ namespace NfcAuth
         IFACEMETHODIMP GetCredentialAt(
             DWORD index, ICredentialProviderCredential** credential) override;
         IFACEMETHODIMP SetUserArray(ICredentialProviderUserArray* users) override;
+
+        // Marshals the LogonUI event sink so the credential's worker thread can
+        // ask for a re-enumeration from its own apartment. Called on the UI
+        // thread from Credential::Advise, which owns the sink's apartment.
+        HRESULT MarshalEventsForWorker(IStream** stream, UINT_PTR* context) noexcept;
 
     private:
         ~Provider() noexcept;
