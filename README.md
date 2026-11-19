@@ -81,7 +81,10 @@ Use `clear-credential` to go back to typing it.
 
 - Sony RC-S300 (PaSoRi), bound to WinUSB
 - Windows 10 or 11, x64
-- Python 3.9+ with `pywin32` and `pyusb`
+- Python 3.9+ with `pywin32` and `pyusb`, **installed for all users**. The
+  service runs as LocalSystem and loads this interpreter, so a per-user
+  installation would let anyone who can write to it run code as SYSTEM. The
+  installer checks this and refuses unless `-AllowUnprotectedPython` is given.
 - Visual Studio 2022 with the C++ x64 toolset (to build the provider)
 - An iPhone with Express Card configured
 
@@ -95,7 +98,9 @@ py -3 -m pip install -r requirements.txt
 ```
 
 This builds and registers the provider, installs and starts the service, and
-removes the older file-signal setup if it is still present.
+removes the older file-signal setup if it is still present. It stops if the
+Python installation it found can be modified without administrator rights, for
+the reason given under Requirements.
 
 The service itself is copied to `C:\Program Files\NfcAuth`, because it runs as
 LocalSystem and must not be startable from a directory you can edit without

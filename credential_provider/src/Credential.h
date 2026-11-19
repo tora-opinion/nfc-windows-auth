@@ -95,6 +95,10 @@ namespace NfcAuth
         UINT_PTR providerAdviseContext_;
         UINT_PTR pendingProviderContext_;
         bool autoLogonArmed_;
+        // Set when LSA rejects the stored secret, so later taps in this
+        // LogonUI session ask for a typed password instead of retrying it.
+        bool storedCredentialRejected_;
+        ULONGLONG consumedAt_;
         // Worker thread only: the last nonce an arming attempt was made for,
         // so each tap is attempted exactly once.
         std::string armAttemptedNonce_;

@@ -20,6 +20,10 @@ namespace NfcAuth
 {
     namespace
     {
+        // How long a spent tap keeps authorising this tile: long enough to
+        // finish typing a password, short enough that walking away ends it.
+        constexpr ULONGLONG kConsumedGraceMs = 60000;
+
         class SecureWString final
         {
         public:
@@ -126,7 +130,8 @@ namespace NfcAuth
           pendingEvents_(nullptr), pendingEventsStream_(nullptr), owner_(nullptr),
           providerEventsStream_(nullptr), pendingProviderStream_(nullptr),
           workerProviderEvents_(nullptr), providerAdviseContext_(0),
-          pendingProviderContext_(0), autoLogonArmed_(false), workerThreadId_(0),
+          pendingProviderContext_(0), autoLogonArmed_(false),
+          storedCredentialRejected_(false), consumedAt_(0), workerThreadId_(0),
           stopEvent_(nullptr), wakeEvent_(nullptr), pendingStopEvent_(nullptr),
           pendingWakeEvent_(nullptr), stopping_(true), workerRunning_(false),
           tapKnown_(false), tapTtlMs_(0), tapObservedAt_(0),
@@ -419,6 +424,11 @@ namespace NfcAuth
         {
             EnterCriticalSection(&lock_);
             ClearPasswordLocked();
+            // Leaving the tile ends the attempt a spent tap authorised, so it
+            // cannot be picked up again later from another sign-in option. An
+            // armed auto sign-in is left alone: it is mid-flight and lapses on
+            // its own.
+            if (!autoLogonArmed_ && consumed_) ClearTapLocked();
             LeaveCriticalSection(&lock_);
         }
         return S_OK;
@@ -599,6 +609,7 @@ namespace NfcAuth
                                         const std::wstring& storedUser,
                                         const std::wstring& storedPassword) noexcept
     {
+        if (storedCredentialRejected_) return false;
         if (tapUser.empty() || storedUser.empty() || storedPassword.empty()) return false;
         if (CompareStringOrdinal(tapUser.c_str(), -1, storedUser.c_str(), -1, TRUE) != CSTR_EQUAL)
             return false;
@@ -617,12 +628,22 @@ namespace NfcAuth
 
     bool Credential::IsTapCurrentLocked(ULONGLONG now) const noexcept
     {
-        return tapKnown_ && (consumed_ || (now >= tapObservedAt_ && now - tapObservedAt_ < tapTtlMs_));
+        if (!tapKnown_) return false;
+        if (consumed_)
+        {
+            // The token is spent, so its TTL no longer applies, but the
+            // authorisation it granted still has to lapse. Without this, a tap
+            // consumed by one submit would keep authorising this tile for as
+            // long as the lock screen stayed up.
+            return now >= consumedAt_ && now - consumedAt_ < kConsumedGraceMs;
+        }
+        return now >= tapObservedAt_ && now - tapObservedAt_ < tapTtlMs_;
     }
 
     void Credential::ClearTapLocked() noexcept
     {
         autoLogonArmed_ = false;
+        consumedAt_ = 0;
         tapKnown_ = false;
         tapUser_.clear();
         tapNonce_.clear();
@@ -821,6 +842,7 @@ namespace NfcAuth
                 if (consumeSucceeded_)
                 {
                     consumed_ = true;
+                    consumedAt_ = GetTickCount64();
                     failureStatus_ = false;
                     if (autoLogonArmed_)
                     {
@@ -1338,7 +1360,7 @@ namespace NfcAuth
         return S_OK;
     }
 
-    HRESULT Credential::ReportResult(NTSTATUS, NTSTATUS, LPWSTR* statusText,
+    HRESULT Credential::ReportResult(NTSTATUS status, NTSTATUS, LPWSTR* statusText,
                                       CREDENTIAL_PROVIDER_STATUS_ICON* statusIcon)
     {
         if (statusText) *statusText = nullptr;
@@ -1347,9 +1369,17 @@ namespace NfcAuth
         {
             EnterCriticalSection(&lock_);
             ClearPasswordLocked();
-            // LSA rejected the stored secret, so fall back to the typed password
-            // instead of resubmitting the same credential forever.
             autoLogonArmed_ = false;
+            if (status < 0)
+            {
+                // The stored secret is stale. Remember that for the rest of this
+                // LogonUI session: disarming alone would let the next tap, which
+                // carries a fresh nonce, submit the same rejected password again
+                // and walk the account towards a lockout.
+                storedCredentialRejected_ = true;
+                statusText_ = kStatusAuthenticationFailed;
+                failureStatus_ = true;
+            }
             LeaveCriticalSection(&lock_);
         }
         return S_OK;

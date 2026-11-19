@@ -13,11 +13,17 @@
 .PARAMETER SkipBuild
     Register the DLL already present in credential_provider\build instead of
     rebuilding it.
+
+.PARAMETER AllowUnprotectedPython
+    Install even when the chosen Python installation can be modified
+    without administrator rights. Doing so hands SYSTEM to anyone who can
+    write to it.
 #>
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$AllowUnprotectedPython
 )
 
 Set-StrictMode -Version Latest
@@ -79,9 +85,86 @@ function Resolve-Python {
     throw 'No Python with pywin32 was found. Install it with: py -3 -m pip install pywin32'
 }
 
+# Identities expected to hold write access to a machine-wide installation.
+# Anyone else who has it can replace code the LocalSystem service loads.
+$script:TrustedWriters = @(
+    'S-1-5-18',      # LocalSystem
+    'S-1-5-32-544',  # Administrators
+    'S-1-5-32-549',  # Server Operators
+    'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464',  # TrustedInstaller
+    'S-1-3-0'        # CREATOR OWNER
+)
+
+function Get-UnprotectedWriters {
+    <#
+        Returns the identities that can modify $Path without being
+        administrators. The service runs as LocalSystem, so everything it
+        loads must be out of an ordinary user's reach.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    # Only individual bits, never composites: FullControl and Modify include
+    # the read bits, so masking with them matches plain Read & Execute and
+    # would flag a correctly locked-down Program Files.
+    $rights = [System.Security.AccessControl.FileSystemRights]
+    $dangerous = [int]($rights::WriteData -bor $rights::AppendData -bor
+                       $rights::Delete -bor $rights::DeleteSubdirectoriesAndFiles -bor
+                       $rights::ChangePermissions -bor $rights::TakeOwnership)
+    # GENERIC_ALL and GENERIC_WRITE, which appear in ACEs unmapped.
+    $dangerous = $dangerous -bor 0x10000000 -bor 0x40000000
+
+    $writers = @()
+    foreach ($rule in (Get-Acl -LiteralPath $Path).Access) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        if ((([int]$rule.FileSystemRights) -band $dangerous) -eq 0) { continue }
+        $sid = try {
+            $rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value
+        }
+        catch {
+            $null
+        }
+        if ($sid -and $script:TrustedWriters -contains $sid) { continue }
+        $writers += $rule.IdentityReference.Value
+    }
+    return @($writers | Sort-Object -Unique)
+}
+
 Write-Step 'Checking prerequisites'
 $python = Resolve-Python
 Write-Note "Python: $($python.Path) $($python.Prefix -join ' ')"
+
+# Moving our own scripts into Program Files is not enough by itself: the
+# service also loads this interpreter and pywin32 from wherever they live.
+$pythonHome = & $python.Path @($python.Prefix + @('-c', 'import sys; print(sys.prefix)'))
+if ($LASTEXITCODE -ne 0 -or -not $pythonHome) {
+    throw 'Could not determine the Python installation directory.'
+}
+$pythonHome = "$pythonHome".Trim()
+# Wrapped in @(): an empty return would otherwise be $null, and reading
+# .Count on that is a terminating error under strict mode.
+$unprotected = @(Get-UnprotectedWriters -Path $pythonHome)
+if ($unprotected.Count -gt 0) {
+    $who = $unprotected -join ', '
+    if (-not $AllowUnprotectedPython) {
+        throw @"
+The Python installation at
+  $pythonHome
+can be modified by: $who
+
+NfcAuthService runs as LocalSystem and loads this interpreter, so anyone able
+to write there could run code as SYSTEM. Install Python for all users, under
+Program Files, and run this script again - or pass -AllowUnprotectedPython to
+accept that risk deliberately.
+"@
+    }
+    Write-Host ''
+    Write-Host "WARNING: $pythonHome can be modified by: $who" -ForegroundColor Yellow
+    Write-Host '         Anyone who can write there can run code as SYSTEM.' -ForegroundColor Yellow
+    Write-Host ''
+}
+else {
+    Write-Note "Python is administrator-protected: $pythonHome"
+}
 
 if (-not $SkipBuild) {
     Write-Step 'Building the Credential Provider'
