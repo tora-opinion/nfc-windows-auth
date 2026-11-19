@@ -1,8 +1,11 @@
 import importlib.util
+import re
 import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -14,8 +17,21 @@ def _load_service_module(monkeypatch):
         def __init__(self, _args):
             self.status_updates = []
 
-        def ReportServiceStatus(self, *args, **kwargs):
-            self.status_updates.append((args, kwargs))
+        # Mirrors pywin32's real signature. Accepting **kwargs here once hid a
+        # TypeError that made the service impossible to stop.
+        def ReportServiceStatus(
+            self, serviceStatus, waitHint=5000, win32ExitCode=0, svcExitCode=0
+        ):
+            self.status_updates.append(
+                (
+                    (serviceStatus,),
+                    {
+                        'waitHint': waitHint,
+                        'win32ExitCode': win32ExitCode,
+                        'svcExitCode': svcExitCode,
+                    },
+                )
+            )
 
     fake_service = SimpleNamespace(
         SERVICE_AUTO_START=2,
@@ -38,7 +54,7 @@ def _load_service_module(monkeypatch):
     return module
 
 
-def test_stop_reports_increasing_checkpoints_while_joining_reader(monkeypatch):
+def test_stop_reports_pending_status_while_joining_reader(monkeypatch):
     module = _load_service_module(monkeypatch)
     monkeypatch.setattr(module, 'STOP_JOIN_INTERVAL_SEC', 0.01)
     monkeypatch.setattr(module, 'STOP_JOIN_TIMEOUT_SEC', 1)
@@ -68,8 +84,35 @@ def test_stop_reports_increasing_checkpoints_while_joining_reader(monkeypatch):
         module.win32service.SERVICE_STOP_PENDING,
         module.win32service.SERVICE_STOP_PENDING,
     ]
-    assert [kwargs['checkPoint'] for _args, kwargs in reports] == [1, 2]
+    # pywin32 owns the checkpoint counter; the service must not pass one.
+    assert all('checkPoint' not in kwargs for _args, kwargs in reports)
     assert all(kwargs['waitHint'] == module.STOP_WAIT_HINT_MS for _args, kwargs in reports)
+
+
+def test_stop_only_uses_arguments_pywin32_accepts():
+    """Pin the call shape against the real pywin32, not against the double.
+
+    SvcStop once passed checkPoint=, which ReportServiceStatus does not take,
+    so every stop request raised TypeError before stop_event was set and the
+    service could not be stopped at all.
+    """
+    import inspect
+
+    win32serviceutil = pytest.importorskip('win32serviceutil')
+    accepted = set(
+        inspect.signature(
+            win32serviceutil.ServiceFramework.ReportServiceStatus
+        ).parameters
+    ) - {'self'}
+
+    source = (REPO_ROOT / 'src' / 'nfc_auth_service.py').read_text(encoding='utf-8')
+    used = set(re.findall(r'ReportServiceStatus\(([^)]*)\)', source, re.S))
+    passed = {
+        match.strip()
+        for block in used
+        for match in re.findall(r'(\w+)\s*=', block)
+    }
+    assert passed <= accepted, f'not accepted by pywin32: {sorted(passed - accepted)}'
 
 
 def test_reader_loop_checks_stop_after_each_reader_call(monkeypatch, tmp_path):

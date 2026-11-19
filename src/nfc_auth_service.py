@@ -48,11 +48,12 @@ class NfcAuthService(win32serviceutil.ServiceFramework):
         self.logger = logging.getLogger(__name__)
 
     def SvcStop(self):
-        checkpoint = 1
+        # ReportServiceStatus takes no checkPoint argument; it keeps and
+        # increments that counter itself. Passing one raises TypeError before
+        # stop_event is set, which would leave the service unstoppable.
         self.ReportServiceStatus(
             win32service.SERVICE_STOP_PENDING,
             waitHint=STOP_WAIT_HINT_MS,
-            checkPoint=checkpoint,
         )
         self.stop_event.set()
         if self.pipe_server is not None:
@@ -71,11 +72,9 @@ class NfcAuthService(win32serviceutil.ServiceFramework):
                 return
             reader_thread.join(timeout=min(STOP_JOIN_INTERVAL_SEC, remaining))
             if reader_thread.is_alive():
-                checkpoint += 1
                 self.ReportServiceStatus(
                     win32service.SERVICE_STOP_PENDING,
                     waitHint=STOP_WAIT_HINT_MS,
-                    checkPoint=checkpoint,
                 )
 
     def SvcDoRun(self):
