@@ -24,9 +24,9 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$repoRoot = $PSScriptRoot
 $dllTarget = Join-Path $env:SystemRoot 'System32\NfcCredentialProvider.dll'
-$serviceScript = Join-Path $repoRoot 'src\nfc_auth_service.py'
+$installRoot = Join-Path $env:ProgramFiles 'NfcAuth'
+$serviceScript = Join-Path $installRoot 'src\nfc_auth_service.py'
 $serviceName = 'NfcAuthService'
 $dataDir = Join-Path $env:ProgramData 'NfcAuth'
 
@@ -85,6 +85,15 @@ if (Test-Path -LiteralPath $dllTarget) {
 }
 else {
     Write-Note 'The DLL was not installed'
+}
+
+Write-Step 'Removing the installed service files'
+if (Test-Path -LiteralPath $installRoot) {
+    Remove-Item -LiteralPath $installRoot -Recurse -Force
+    Write-Note "Deleted $installRoot"
+}
+else {
+    Write-Note 'Nothing was installed there'
 }
 
 if ($Purge) {

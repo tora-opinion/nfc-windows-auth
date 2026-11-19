@@ -97,20 +97,24 @@ py -3 -m pip install -r requirements.txt
 This builds and registers the provider, installs and starts the service, and
 removes the older file-signal setup if it is still present.
 
+The service itself is copied to `C:\Program Files\NfcAuth`, because it runs as
+LocalSystem and must not be startable from a directory you can edit without
+administrator rights.
+
 Then register your iPhone against your Windows account:
 
 ```powershell
 # Local account
-py -3 tools\nfc_cards.py register --name iPhone --windows-user "$env:USERDOMAIN\$env:USERNAME"
+py -3 "C:\Program Files\NfcAuth\tools\nfc_cards.py" register --name iPhone --windows-user "$env:USERDOMAIN\$env:USERNAME"
 
 # Microsoft account
-py -3 tools\nfc_cards.py register --name iPhone --windows-user "MicrosoftAccount\you@example.com"
+py -3 "C:\Program Files\NfcAuth\tools\nfc_cards.py" register --name iPhone --windows-user "MicrosoftAccount\you@example.com"
 ```
 
 Optionally enable hands-free sign-in, having read the warning above:
 
 ```powershell
-py -3 tools\nfc_cards.py set-credential --windows-user "MicrosoftAccount\you@example.com"
+py -3 "C:\Program Files\NfcAuth\tools\nfc_cards.py" set-credential --windows-user "MicrosoftAccount\you@example.com"
 ```
 
 Lock the PC with <kbd>Win</kbd>+<kbd>L</kbd> and hold the iPhone to the reader.
@@ -118,9 +122,9 @@ Lock the PC with <kbd>Win</kbd>+<kbd>L</kbd> and hold the iPhone to the reader.
 ## Managing cards
 
 ```powershell
-py -3 tools\nfc_cards.py list              # cards, and whether auto sign-in is set
-py -3 tools\nfc_cards.py remove --name iPhone
-py -3 tools\nfc_cards.py clear-credential  # back to typing the password
+py -3 "C:\Program Files\NfcAuth\tools\nfc_cards.py" list              # cards, and whether auto sign-in is set
+py -3 "C:\Program Files\NfcAuth\tools\nfc_cards.py" remove --name iPhone
+py -3 "C:\Program Files\NfcAuth\tools\nfc_cards.py" clear-credential  # back to typing the password
 ```
 
 ## Uninstall

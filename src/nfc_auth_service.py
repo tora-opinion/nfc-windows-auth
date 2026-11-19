@@ -100,10 +100,14 @@ class NfcAuthService(win32serviceutil.ServiceFramework):
         self.logger = setup_logging('nfc_auth_service', data_dir / 'service.log')
         key = load_key()
         settings = load_settings()
+        # Cards are looked up per tap, so an empty store is a normal state right
+        # after installation. Staying up means a card registered later works
+        # without anyone remembering to restart the service.
         cards = load_cards()
         if not cards:
-            self.logger.error('No cards registered')
-            return
+            self.logger.warning(
+                'No cards are registered yet; register one with tools/nfc_cards.py'
+            )
 
         libusb_path = find_libusb(settings, BASE_DIR)
         if not libusb_path:
@@ -117,7 +121,7 @@ class NfcAuthService(win32serviceutil.ServiceFramework):
         self.pipe_server.start()
         self.reader = RCS300(libusb_path)
         presence_gate = PresenceGate()
-        self.logger.info('Registered cards: %d', len(cards))
+        self.logger.info('Registered cards at start: %d', len(cards))
         self.logger.info('Monitoring for NFC cards')
 
         session_active = False

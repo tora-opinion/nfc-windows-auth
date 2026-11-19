@@ -26,7 +26,11 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = $PSScriptRoot
 $dllSource = Join-Path $repoRoot 'credential_provider\build\NfcCredentialProvider.dll'
 $dllTarget = Join-Path $env:SystemRoot 'System32\NfcCredentialProvider.dll'
-$serviceScript = Join-Path $repoRoot 'src\nfc_auth_service.py'
+# The service runs as LocalSystem, so its code must live somewhere an
+# unprivileged user cannot rewrite. A working copy under the user's profile
+# would otherwise hand out SYSTEM to anyone who can edit it.
+$installRoot = Join-Path $env:ProgramFiles 'NfcAuth'
+$serviceScript = Join-Path $installRoot 'src\nfc_auth_service.py'
 $serviceName = 'NfcAuthService'
 
 # The first provider in this project; it read a signal file any user could
@@ -88,6 +92,39 @@ catch {
 if ($LASTEXITCODE -ne 0) { throw "regsvr32 failed with exit code $LASTEXITCODE." }
 Write-Note "Registered $dllTarget"
 
+Write-Step 'Copying the service to a protected location'
+foreach ($subdirectory in @('src', 'tools')) {
+    $destination = Join-Path $installRoot $subdirectory
+    New-Item -ItemType Directory -Path $destination -Force | Out-Null
+}
+
+# Protect the tree explicitly rather than trusting whatever Program Files
+# happens to be configured with: full control for SYSTEM and Administrators,
+# read and execute for everyone else.
+$acl = Get-Acl -LiteralPath $installRoot
+$acl.SetAccessRuleProtection($true, $false)
+foreach ($rule in @($acl.Access)) { $null = $acl.RemoveAccessRule($rule) }
+$inherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+$propagation = [System.Security.AccessControl.PropagationFlags]::None
+foreach ($grant in @(
+    @('S-1-5-18', 'FullControl'),
+    @('S-1-5-32-544', 'FullControl'),
+    @('S-1-5-32-545', 'ReadAndExecute')
+)) {
+    $identity = New-Object System.Security.Principal.SecurityIdentifier($grant[0])
+    $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $identity, $grant[1], $inherit, $propagation, 'Allow')))
+}
+Set-Acl -LiteralPath $installRoot -AclObject $acl
+
+Copy-Item -Path (Join-Path $repoRoot 'src\*.py') -Destination (Join-Path $installRoot 'src') -Force
+$libusb = Join-Path $repoRoot 'src\libusb-1.0.dll'
+if (Test-Path -LiteralPath $libusb) {
+    Copy-Item -LiteralPath $libusb -Destination (Join-Path $installRoot 'src') -Force
+}
+Copy-Item -Path (Join-Path $repoRoot 'tools\*.py') -Destination (Join-Path $installRoot 'tools') -Force
+Write-Note "Installed to $installRoot"
+
 Write-Step 'Installing the reader service'
 $serviceArguments = $python.Prefix + @($serviceScript, '--startup', 'auto', 'install')
 & $python.Path @serviceArguments
@@ -126,11 +163,11 @@ Write-Host ''
 Write-Step 'Done. Next steps:'
 Write-Host ''
 Write-Host '  1. Register your iPhone against your Windows account:'
-Write-Host "       $($python.Path) $($python.Prefix -join ' ') tools\nfc_cards.py register --name iPhone --windows-user ""$env:USERDOMAIN\$env:USERNAME"""
+Write-Host "       $($python.Path) $($python.Prefix -join ' ') ""$installRoot\tools\nfc_cards.py"" register --name iPhone --windows-user ""$env:USERDOMAIN\$env:USERNAME"""
 Write-Host '     For a Microsoft account use MicrosoftAccount\your@email as the user.'
 Write-Host ''
 Write-Host '  2. Optional, for hands-free sign-in, store the password:'
-Write-Host "       $($python.Path) $($python.Prefix -join ' ') tools\nfc_cards.py set-credential --windows-user ""MicrosoftAccount\your@email"""
+Write-Host "       $($python.Path) $($python.Prefix -join ' ') ""$installRoot\tools\nfc_cards.py"" set-credential --windows-user ""MicrosoftAccount\your@email"""
 Write-Host '     Without this the tap is a first factor and you still type the password.'
 Write-Host ''
 Write-Host '  3. Lock with Win+L and hold the iPhone to the reader.'
