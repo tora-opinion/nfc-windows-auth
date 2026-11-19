@@ -95,6 +95,9 @@ namespace NfcAuth
         UINT_PTR providerAdviseContext_;
         UINT_PTR pendingProviderContext_;
         bool autoLogonArmed_;
+        // Worker thread only: the last nonce an arming attempt was made for,
+        // so each tap is attempted exactly once.
+        std::string armAttemptedNonce_;
         DWORD workerThreadId_;
         HANDLE stopEvent_;
         HANDLE wakeEvent_;

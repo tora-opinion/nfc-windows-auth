@@ -691,13 +691,29 @@ namespace NfcAuth
         bool armed = false;
         std::wstring status;
 
-        // Loaded outside the lock: it touches the disk and DPAPI, and
-        // GetSerialization must not block behind that on the UI thread.
+        // Arm each tap at most once. A status poll keeps reporting the same live
+        // tap every cycle, so re-arming here would both re-read the credential
+        // needlessly and resurrect an arm that ReportResult had just disarmed
+        // after LSA rejected it, retrying a bad password until the tap expired.
+        bool armAttempt = false;
         std::wstring storedUser;
         SecureWString storedPassword;
-        if (result.kind == PipeResultKind::Tap)
+        if (result.kind == PipeResultKind::Tap && !result.nonce.empty() &&
+            result.nonce != armAttemptedNonce_)
         {
-            if (!LoadStoredCredential(&storedUser, &storedPassword.value))
+            armAttempt = true;
+            try
+            {
+                armAttemptedNonce_ = result.nonce;
+            }
+            catch (...)
+            {
+                armAttemptedNonce_.clear();
+                armAttempt = false;
+            }
+            // Read outside the lock: it touches the disk and DPAPI, and
+            // GetSerialization must not block behind that on the UI thread.
+            if (armAttempt && !LoadStoredCredential(&storedUser, &storedPassword.value))
             {
                 storedUser.clear();
                 storedPassword.value.clear();
@@ -728,7 +744,8 @@ namespace NfcAuth
                 tapNonce_ = std::move(result.nonce);
                 tapTtlMs_ = result.ttlMs;
                 tapObservedAt_ = GetTickCount64();
-                if (ArmAutoLogonLocked(tapUser_, storedUser, storedPassword.value))
+                if (armAttempt && tapNonce_ == armAttemptedNonce_ &&
+                    ArmAutoLogonLocked(tapUser_, storedUser, storedPassword.value))
                 {
                     passwordVisible_ = false;
                     statusText_ = kStatusSigningIn;
