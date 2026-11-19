@@ -102,7 +102,7 @@ function Resolve-Python {
         # than installed and discovered broken later:
         #   3  32-bit, but the bundled libusb-1.0.dll is x64
         #   4  older than the Python 3.9 the service code needs
-        #   other non-zero  pywin32 is missing
+        #   other non-zero  pywin32 or pyusb is missing
         # The version test comes first and parses under Python 2, so an old
         # registered interpreter reports itself instead of a syntax error.
         $probe = @'
@@ -110,6 +110,7 @@ import sys
 if sys.version_info < (3, 9): sys.exit(4)
 if sys.maxsize <= 2**32: sys.exit(3)
 import win32serviceutil
+import usb.core
 '@
         $arguments = @($candidate.Prefix) + @('-c', $probe)
         # The output is discarded rather than left on the pipeline, where it
@@ -140,7 +141,7 @@ import win32serviceutil
             $why = switch ($exitCode) {
                 3 { 'is 32-bit, and the bundled libusb-1.0.dll is x64' }
                 4 { 'is older than Python 3.9' }
-                default { 'cannot import pywin32' }
+                default { 'cannot import pywin32 and pyusb' }
             }
             throw "The interpreter at -PythonPath $($why): $($candidate.Path)"
         }
